@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agent criminal analysis (not the raw CLI packet)",
+  "type": "object",
+  "required": ["investigation_type", "target", "assessment", "evidence", "hypotheses", "ach_matrix", "investigation_plan", "limitations"],
+  "properties": {
+    "investigation_type": {"const": "criminal"},
+    "target": {"type": "string", "minLength": 1},
+    "confidence": {"type": "null", "description": "No uncalibrated global probability"},
+    "assessment": {
+      "type": "object", "required": ["status", "statement", "evidence_ids"],
+      "properties": {"status": {"enum": ["observed", "provisional", "undetermined", "refuted"]}, "statement": {"type": "string"}, "evidence_ids": {"$ref": "#/definitions/ids"}}
+    },
+    "evidence": {"type": "array", "items": {
+      "type": "object", "required": ["evidence_id", "statement", "source_location", "verification", "dependency_group"],
+      "properties": {"evidence_id": {"type": "string"}, "statement": {"type": "string"}, "source_location": {"type": ["string", "object"]}, "verification": {"enum": ["unverified", "verified", "disputed"]}, "dependency_group": {"type": ["string", "null"]}}
+    }},
+    "hypotheses": {"type": "array", "minItems": 1, "items": {
+      "type": "object", "required": ["hypothesis_id", "statement", "level", "supporting_evidence", "counter_evidence", "missing_evidence"],
+      "properties": {"hypothesis_id": {"type": "string"}, "statement": {"type": "string"}, "level": {"enum": ["source", "activity", "event", "responsibility"]}, "supporting_evidence": {"$ref": "#/definitions/ids"}, "counter_evidence": {"$ref": "#/definitions/ids"}, "missing_evidence": {"$ref": "#/definitions/ids"}}
+    }},
+    "ach_matrix": {"type": "array", "items": {
+      "type": "object", "required": ["evidence_id", "hypothesis_id", "effect", "rationale"],
+      "properties": {"evidence_id": {"type": "string"}, "hypothesis_id": {"type": "string"}, "effect": {"enum": ["supports", "contradicts", "neutral", "unknown"]}, "rationale": {"type": "string"}}
+    }},
+    "investigation_plan": {"type": "array", "minItems": 1, "items": {
+      "type": "object", "required": ["action_id", "action", "priority", "evidence_ids", "hypothesis_ids", "expected_results", "decision_rule", "feasibility", "stop_or_update"],
+      "properties": {"action_id": {"type": "string"}, "action": {"type": "string", "minLength": 1}, "priority": {"enum": ["urgent", "high", "normal"]}, "evidence_ids": {"$ref": "#/definitions/ids"}, "hypothesis_ids": {"$ref": "#/definitions/ids"}, "expected_results": {"type": "object", "minProperties": 2, "additionalProperties": {"type": "string"}}, "decision_rule": {"type": "string"}, "feasibility": {"type": ["string", "object"]}, "stop_or_update": {"type": "string"}}
+    }},
+    "limitations": {"$ref": "#/definitions/ids"}
+  },
+  "definitions": {"ids": {"type": "array", "items": {"type": "string"}}}
+}

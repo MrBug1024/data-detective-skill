@@ -1,0 +1,19 @@
+{
+  "fuzzy_threshold": 80,
+  "semantic_threshold": 0.6,
+  "max_candidates": 100,
+  "max_hops": 3,
+  "known_key_fields": ["客户ID", "订单ID", "产品代码", "回款ID"],
+  "field_weights": {
+    "客户ID": 2.0,
+    "订单ID": 2.0,
+    "产品代码": 1.8,
+    "回款ID": 1.8,
+    "金额": 1.5
+  },
+  "joint_fields": [
+    ["客户ID", "产品代码"],
+    ["订单ID", "金额"]
+  ],
+  "skip_fields": ["序号", "index", "no.", "编号", "备注", "Unnamed"]
+}

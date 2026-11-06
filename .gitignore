@@ -1,0 +1,100 @@
+.dd_cache/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+test/results/
+
+# ═══════════════════════════════════════════════
+#  data-detective-skill — .gitignore
+# ═══════════════════════════════════════════════
+
+# ── Python 编译缓存 ──────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# ── 虚拟环境 ────────────────────────────────────
+.venv/
+venv/
+env/
+.env/
+ENV/
+
+# ── 调查索引缓存（运行时自动生成，体积大，含业务数据指纹）──
+.dd_cache/
+*.pkl
+*.pickle
+
+# ── 测试缓存 ────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ── 运行时输出（每次运行都会重新生成）──────────────
+# 调查报告 JSON
+examples/chain.json
+examples/data_report.json
+examples/entity_case/entity_report.json
+examples/entity_case/validation_report.json
+**/report.json
+**/validation.json
+
+# 调查墙 HTML（由脚本生成，不需要纳入版本控制）
+examples/wall.html
+examples/data_wall.html
+examples/entity_case/entity_wall.html
+examples/entity_case/validation_wall.html
+**/*_wall.html
+
+# ── 用户真实业务数据（敏感！绝对不能提交）──────────
+# 如果用户把自己的 xlsx 放进来测试，不能误提交
+# 注意：examples/ 下的演示数据是由脚本生成的，
+# 可以提交生成脚本，但生成出的 xlsx 文件视情况决定：
+#   - 若示例数据无敏感信息 → 可以提交（方便用户开箱即用）
+#   - 若含真实业务数据    → 取消下面的注释
+# examples/A.xlsx
+# examples/B.xlsx
+# examples/C.xlsx
+# examples/D.xlsx
+# examples/R1.xlsx
+# examples/entity_case/contracts.xlsx
+# examples/entity_case/profiles.xlsx
+# examples/entity_case/transactions.xlsx
+
+# 用户自己的数据文件（放在 data/ 或 my_data/ 目录下）
+data/
+my_data/
+input/
+private/
+
+# ── 配置文件中可能含密钥 ────────────────────────
+.env
+.env.local
+.env.*.local
+secrets.json
+**/config.local.json
+
+# ── IDE / 编辑器 ────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── 日志 ────────────────────────────────────────
+*.log
+logs/
+
+# ── 打包产物 ────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+*.whl

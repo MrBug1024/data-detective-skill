@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DataDetectiveConfig",
+  "description": "数据链路侦探配置",
+  "type": "object",
+  "properties": {
+    "fuzzy_threshold": {
+      "type": "number", "minimum": 0, "maximum": 100, "default": 80,
+      "description": "模糊匹配相似度阈值（0-100）"
+    },
+    "semantic_threshold": {
+      "type": "number", "minimum": 0, "maximum": 1, "default": 0.6,
+      "description": "语义相似度阈值"
+    },
+    "max_candidates": {
+      "type": "integer", "minimum": 1, "maximum": 200, "default": 20,
+      "description": "一次匹配返回候选的全局上限（规则候选亦计入）"
+    },
+    "max_hops": {
+      "type": "integer", "minimum": 1, "maximum": 10, "default": 3,
+      "description": "保留配置；当前引擎未实现多跳搜索，不据此推断能力"
+    },
+    "criminal_max_units": {
+      "type": "integer", "minimum": 1, "maximum": 1000, "default": 100,
+      "description": "刑侦案件包最大返回单元数；遗漏计入coverage"
+    },
+    "criminal_max_chars": {
+      "type": "integer", "minimum": 100, "maximum": 20000, "default": 1600,
+      "description": "刑侦每证据单元最大字符数；截断计入coverage"
+    },
+    "entity_max_units": {
+      "type": "integer", "minimum": 1, "maximum": 1000, "default": 100
+    },
+    "entity_start": {"type": "integer", "minimum": 0, "default": 0},
+    "entity_max_chars": {"type": "integer", "minimum": 100, "maximum": 20000, "default": 1600},
+    "entity_identity_fields": {
+      "type": "array", "items": {"type": "string", "minLength": 1},
+      "description": "明确用于候选身份分组的字段；相同标识声明仍需核实"
+    },
+    "field_aliases": {
+      "type": "object", "additionalProperties": {
+        "type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}
+      },
+      "description": "结果字段名到源字段名的显式映射；跨角色ID不能仅凭同值关联"
+    },
+    "known_key_fields": {
+      "type": "array", "items": { "type": "string" },
+      "description": "用户指定的关联键字段名列表",
+      "examples": [["客户ID", "订单ID", "产品代码"]]
+    },
+    "field_weights": {
+      "type": "object",
+      "description": "字段匹配权重（字段名→权重）",
+      "additionalProperties": { "type": "number" },
+      "examples": [{ "客户ID": 2.0, "金额": 1.5 }]
+    },
+    "joint_fields": {
+      "type": "array",
+      "items": { "type": "array", "items": { "type": "string" } },
+      "description": "联合关联字段组",
+      "examples": [[["姓名", "日期"], ["产品代码", "数量"]]]
+    },
+    "skip_fields": {
+      "type": "array", "items": { "type": "string" },
+      "description": "跳过的字段（不参与匹配）",
+      "default": ["序号", "index", "no.", "编号"]
+    }
+  }
+}

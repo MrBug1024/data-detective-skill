@@ -1,0 +1,18 @@
+openpyxl>=3.1.0
+pandas>=2.0.0
+pdfplumber>=0.10.0
+python-docx>=1.1.0
+rapidfuzz>=3.0.0
+networkx>=3.0
+Jinja2>=3.1.0
+click>=8.1.0
+jsonschema>=4.0.0
+numpy>=1.24.0
+# For image dimensions / OCR sidecar validation (no OCR engine bundled):
+Pillow>=10.0.0
+# Optional legacy XLS reader:
+# xlrd>=2.0.1
+# Optional for semantic matching:
+# sentence-transformers>=2.2.0
+# Optional for OCR:
+# pytesseract>=0.3.10

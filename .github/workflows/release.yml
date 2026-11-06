@@ -1,0 +1,139 @@
+name: Publish skill release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing tag version without v (for example, 3.2.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skill-release-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: "1"
+    outputs:
+      release_tag: ${{ steps.version.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/v{0}', inputs.version) || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            scripts/requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: python -m pip install -r scripts/requirements.txt -r requirements-dev.txt
+      - name: Verify tag matches skill version
+        id: version
+        shell: python
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          import os
+          from pathlib import Path
+          import re
+          import yaml
+
+          requested = os.environ.get("INPUT_VERSION", "")
+          tag = f"v{requested}" if requested else os.environ["GITHUB_REF_NAME"]
+          if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+              raise SystemExit("Release tag must have the form vMAJOR.MINOR.PATCH")
+          source = Path("SKILL.md").read_text(encoding="utf-8-sig")
+          metadata = yaml.safe_load(source.split("---", 2)[1])
+          declared = str(metadata["metadata"]["version"])
+          if tag != f"v{declared}":
+              raise SystemExit(f"Tag {tag} differs from SKILL.md version {declared}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"release_tag={tag}\n")
+      - name: Validate distributable skill
+        run: python scripts/package_skill.py --check
+      - name: Run offline regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Build runtime archive
+        run: python scripts/package_skill.py --out dist/data-detective.zip
+      - name: Verify archive and write checksum
+        shell: python
+        run: |
+          import hashlib
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+          import zipfile
+
+          archive = Path("dist/data-detective.zip").resolve()
+          with tempfile.TemporaryDirectory(prefix="data-detective-release-") as temp:
+              temporary = Path(temp)
+              with zipfile.ZipFile(archive) as package:
+                  package.extractall(temporary / "extracted")
+              unpacked = temporary / "extracted" / "data-detective"
+              subprocess.run(
+                  [sys.executable, str(unpacked / "scripts/install_skill.py"),
+                   "--dest", str(temporary / "skills")], check=True,
+              )
+              installed = temporary / "skills" / "data-detective"
+              subprocess.run(
+                  [sys.executable, str(installed / "scripts/detective.py"), "--help"],
+                  check=True, cwd=temporary,
+              )
+              assert (installed / "LICENSE").is_file()
+              assert (installed / "agents/openai.yaml").is_file()
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          archive.with_suffix(".zip.sha256").write_text(
+              f"{digest}  {archive.name}\n", encoding="ascii",
+          )
+      - name: Save release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: |
+            dist/data-detective.zip
+            dist/data-detective.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: dist
+      - name: Publish new GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to replace it."
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            dist/data-detective.zip \
+            dist/data-detective.zip.sha256 \
+            --verify-tag \
+            --title "Data Detective $RELEASE_TAG" \
+            --generate-notes

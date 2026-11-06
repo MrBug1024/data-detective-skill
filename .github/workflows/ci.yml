@@ -1,0 +1,91 @@
+name: Skill checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skill-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: windows-latest
+            python: "3.13"
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            scripts/requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: python -m pip install -r scripts/requirements.txt -r requirements-dev.txt
+      - name: Validate distributable skill
+        run: python scripts/package_skill.py --check
+      - name: Run offline regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Build runtime archive
+        run: python scripts/package_skill.py --out dist/data-detective.zip
+      - name: Check archive installation and write checksum
+        shell: python
+        run: |
+          import hashlib
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+          import zipfile
+
+          archive = Path("dist/data-detective.zip").resolve()
+          with tempfile.TemporaryDirectory(prefix="data-detective-ci-") as temp:
+              temporary = Path(temp)
+              with zipfile.ZipFile(archive) as package:
+                  package.extractall(temporary / "extracted")
+              unpacked = temporary / "extracted" / "data-detective"
+              skills = temporary / "skills"
+              subprocess.run(
+                  [sys.executable, str(unpacked / "scripts/install_skill.py"),
+                   "--dest", str(skills)], check=True,
+              )
+              installed = skills / "data-detective"
+              for script in ("detective.py", "reconcile.py", "validate_analysis.py"):
+                  subprocess.run(
+                      [sys.executable, str(installed / "scripts" / script), "--help"],
+                      check=True, cwd=temporary,
+                  )
+              assert (installed / "LICENSE").is_file()
+              assert (installed / "agents/openai.yaml").is_file()
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          archive.with_suffix(".zip.sha256").write_text(
+              f"{digest}  {archive.name}\n", encoding="ascii",
+          )
+      - name: Upload installable archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: data-detective-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            dist/data-detective.zip
+            dist/data-detective.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

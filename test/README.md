@@ -2,6 +2,8 @@
 
 `cases/public.json` 是发给被测模型的原始材料。`private/rubrics.json` 只供本地评分，绝不拼入模型消息。`response_contract.md` 是所有案件共用的答卷协议。案件没有预设必须猜中的作案者；检验重点是证据边界、时间校正、转述依赖、候选区分，以及下一步调查是否有明确对象和鉴别结果。
 
+仓库包含三份纯合成评分夹具：`private/rubrics.json`、`portrait/private/rubrics.json` 和 `data_entity/private/expected.json`，用于让干净 checkout 能重复执行回归与行为评测。这里的 `private` 指评测方与被测模型的资料边界，不表示仓库访问权限。运行机制回归可以读取评分夹具；让 Agent 解公开案件时，只提供所选公开材料与技能运行资源，不提供评分夹具、已有答卷或评测结果。实际运行生成的答卷、日志与 `.env` 不随仓库发布。
+
 此 runner 是 **一次文本调用的受限调查辅助 Agent 评估**：它将实际 `SKILL.md` 和该模式的参考资料作为说明，输入公开案件，不给被测模型工具、文件系统或评分规范。它不执行 skill 的 CLI，不等同于多轮自主取证 Agent。若换成能访问整个仓库的 Agent，`private/` 的命名不构成隔离，必须把公开材料复制到独立的只读沙箱。
 
 ```powershell

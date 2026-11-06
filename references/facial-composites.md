@@ -152,4 +152,4 @@ python scripts/detective.py portrait --case revised-observations.json --previous
 
 每次修订须使用独立输出路径。`--previous` 检查旧证据 ID 不被改写或删除，并记录旧版 SHA256、变化特征、移除/改写的旧主张和修订理由；它不判断修订更准确。不要把初次笔录和看图后的回忆混成一次观察。超过 200 条来源/200 条观察或总原文 40 万字符时明确拆案/定向提取，脚本拒绝超限，不静默截断。
 
-画像专项的公开案情和隔离评分流程见 [盲测说明](../test/portrait/README.md)。
+画像专项的公开案情和隔离评分流程见仓库内的[盲测说明](https://github.com/MrBug1024/data-detective-skill/blob/main/test/portrait/README.md)；这些开发评测材料不包含在精简技能包中。

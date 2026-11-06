@@ -1,0 +1,19 @@
+{
+  "format_cases": [
+    {"id":"F01_csv", "file":"records.csv", "locator":{"row":2}},
+    {"id":"F02_xlsx", "file":"records.xlsx", "locator":{"sheet":"Orders", "row":2}},
+    {"id":"F03_txt", "file":"note.txt", "locator":{"row":3}},
+    {"id":"F04_md", "file":"rules.md", "locator":{"row":3}},
+    {"id":"F05_docx_table", "file":"records.docx", "locator":{"table":true}},
+    {"id":"F06_pdf", "file":"records.pdf", "locator":{"page":2}},
+    {"id":"F07_sql", "file":"dump.sql", "locator":{"row":3}},
+    {"id":"F08_image_sidecar", "file":"receipt.png", "locator":{"page":1,"bbox":true}}
+  ],
+  "precision_cases": [
+    "D01_same_amount_keys", "D02_literal_zero_id", "D03_duplicate_key_conflict", "D04_mixed_format_trace",
+    "E01_same_name_shared_phone", "E02_negated_relationship", "E03_bounded_coverage",
+    "I01_missing_source", "I02_malformed_source", "I03_image_without_ocr",
+    "C01_same_stat_content_change", "C02_sidecar_change", "C03_sidecar_source_mismatch", "F09_multiline_csv", "F10_gb18030_csv",
+    "R01_decimal_recompute", "R02_wrong_total", "R03_duplicate_price_key"
+  ]
+}

@@ -1,8 +1,9 @@
 ---
 name: data-detective
-description: 对文件与现场描述进行数据溯源、实体核查或刑侦分析，输出可定位证据、竞争解释和调查计划；有目击或影像材料时支持面部特征整理与合成画像流程。适用于对账、数据血缘、关联核查、案情分析与时间线重建。
+description: 数据溯源与调查分析（data lineage, entity investigation, evidence analysis）。对文件与现场描述进行对账、血缘追踪、实体核查、案情分析与时间线重建，输出可定位证据、竞争解释和调查计划；有目击或影像材料时支持面部特征整理与合成画像流程。
+license: Apache-2.0
 metadata:
-  version: "3.2"
+  version: "3.2.1"
 ---
 
 # Data Detective：数据溯源 · 实体调查 · 刑侦模式
@@ -38,7 +39,9 @@ metadata:
 
 DATA/ENTITY 跨格式任务先读[文件摄取与覆盖](references/file-ingestion.md)。脚本的 `candidate_links` 与 `mentions_only_identity_unresolved` 都是中间阶段；Agent须继续核对规则/身份、处理覆盖缺口，保存独立的完成分析。不能把候选分数或文件扩展名支持当成调查已完成。
 
-命令从技能根目录执行；其他目录使用绝对脚本路径。`--sources` 给出具体文件；不要假设 shell 自动展开通配符。
+需要 Python 3.10+；运行脚本前检查当前 Python 环境，缺依赖时按 `scripts/requirements.txt` 安装。纯文本分析无需运行 CLI；画像生成需要宿主提供的图像工具，本技能不自带模型服务，也不需要 API key 才能运行本地 CLI。
+
+下例脚本路径相对于技能根目录；安装后使用该技能实际目录的绝对脚本路径，在用户工作目录执行。输入、输出及默认缓存相对于当前工作目录，不要将案件材料或生成报告写入技能安装目录。`--sources` 给出具体文件；不要假设 shell 自动展开通配符。
 
 ```bash
 # 依赖：python -m pip install -r scripts/requirements.txt
@@ -67,13 +70,4 @@ python scripts/detective.py investigate --mode entity --target "目标名或ID" 
 - DATA确认字段来源前必须有明确字段映射/连接与计算规则，并实际重算。`reconcile.py` 的 `reconciled_not_proven_lineage` 仅证明所给计划计算相符；历史执行血缘仍需原始公式、代码、执行日志等。ENTITY 的 `candidate_entities` 按标识声明分组，不能自动认定身份；`entity_identity_fields` 可显式指定角色字段，订单号等业务记录ID不自动当人ID。
 - 没有足够材料，合理结果是“尚不能区分 + 最能区分的下一步”，不是强行锁定一人。结论随反证更新，保留旧判断和变更理由。
 
-## 验证能力
-
-```bash
-python -m unittest discover -s tests -v
-python test/run_blind_eval.py --help
-# 仅经显式 --live 联网；默认用 test/.env，兼容现有 tests/.env
-python test/run_blind_eval.py --live --out test/results/live.json
-```
-
-盲测只给被测模型公开案情、本技能与适用参考；隐藏评分文件仅由本地评分器读取。不要在实际解题上下文中读取隐藏答案。查看评测隔离方式、指标和限制：[评测说明](test/README.md)。这些是模拟案件与回归检查，不构成真实案件准确率承诺。
+开发与评测说明见[项目仓库](https://github.com/MrBug1024/data-detective-skill#开发与验证)，不属于安装后的运行依赖。模拟案件与回归检查不构成真实案件准确率承诺。

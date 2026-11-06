@@ -1,84 +1,157 @@
-# Data Detective v3.2
+# Data Detective · 数据侦探
 
-面向 Agent 的数据溯源、实体核查与刑侦分析技能。入口为 [SKILL.md](SKILL.md)；按模式加载参考，输出带来源的证据、竞争解释与可执行的调查计划。
+[![CI](https://github.com/MrBug1024/data-detective-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/MrBug1024/data-detective-skill/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
-原“事件还原”已升级为**刑侦模式 CRIMINAL**，`--mode event` 保留为兼容别名。专业参考覆盖洛卡德、物证同一认定、LR/贝叶斯、IBE/ACH、行为与心理假说、MO/签名、地理画像、被害人学、日常活动和偏差控制；均附官方或原始研究链接。
+面向 Agent 的数据溯源、实体核查与刑侦分析 skill。把分散的表格、文档和现场描述整理成**可定位的证据、可比较的解释和可执行的核查计划**。
 
-新增[面部特征与合成画像工作流](references/facial-composites.md)：从独立目击原话/可见影像整理特征，保留未知、污染风险和冲突，生成按来源分开的局部绘图请求，并记录修订。实际画图由 Agent 调用可用图像工具完成并查看验收；本库不内置人脸生成模型。
+支持 Codex 等遵循 Agent Skills 格式的宿主；提供 Claude Code 的本地目录安装。技能名为 **`data-detective`**，版本 **3.2.1**，入口为 [SKILL.md](SKILL.md)。Python CLI 负责确定性检索与整理，Agent 继续完成规则核验和分析。
 
-DATA/ENTITY现支持跨格式可定位摄取、候选覆盖报告、保守身份分组及显式规则重算。支持范围和预处理要求见[文件摄取](references/file-ingestion.md)，计算计划见[数据与实体工作流](references/data-entity-workflows.md)。
+| 模式 | 适用任务 | 输出 |
+|---|---|---|
+| DATA 数据溯源 | 对账、字段来源、关联规则、异常计算 | 来源位置、候选链路、覆盖缺口、显式规则重算 |
+| ENTITY 实体核查 | 人物/组织提及、同名消歧、关系核查 | 标识分组、来源属性、歧义与冲突 |
+| CRIMINAL 刑侦分析 | 案情梳理、证据解释、时间线重建 | 证据账本、竞争假说、调查优先级 |
 
-## 运行
+另含[面部特征与合成画像工作流](references/facial-composites.md)。本库编译可追溯的特征规格；实际生成图片需要宿主提供图像工具。
 
-```powershell
+## 通过 GitHub 链接安装
+
+### Codex：复制给 Agent
+
+将下面这句话发送给支持 `skill-installer` 的 Codex：
+
+```text
+使用 $skill-installer 从 https://github.com/MrBug1024/data-detective-skill 安装技能：仓库内路径为 .，安装名称为 data-detective。
+```
+
+根目录就是 skill，必须将仓库根路径 `.` 和安装名 `data-detective` 一并指定。安装器的默认目录由当前 Codex 环境决定；可在下一轮输入 `$data-detective` 使用，未出现时重启宿主。参见 [Codex 官方 skills 文档](https://learn.chatgpt.com/docs/build-skills)。
+
+### 本地安装：Windows / macOS / Linux
+
+需要 Git 与 **Python 3.10+**。以下命令可在 PowerShell 或常见 Unix shell 中执行；`python` 不存在时使用本机的 `python3`。
+
+```sh
+git clone https://github.com/MrBug1024/data-detective-skill.git
+cd data-detective-skill
 python -m pip install -r scripts/requirements.txt
+python scripts/install_skill.py --target codex
+```
 
-# DATA：结果物理行号含表头；多sheet结果用 --sheet 显式指定
+建议在自己的 Python 虚拟环境中安装依赖；运行 CLI 时使用同一环境的解释器。安装脚本仅复制技能文件，不调用 pip、不联网，也不修改宿主配置。
+
+| 目标 | 命令 | 安装位置 |
+|---|---|---|
+| Codex | `python scripts/install_skill.py --target codex` | `~/.agents/skills/data-detective/` |
+| Claude Code | `python scripts/install_skill.py --target claude` | `~/.claude/skills/data-detective/` |
+| 自定义 skills 目录 | `python scripts/install_skill.py --dest /path/to/skills` | `/path/to/skills/data-detective/` |
+
+Windows 上 `~` 对应当前用户目录。自定义路径有空格时加引号；`--dest` 指定 **skills 的父目录**，脚本会添加 `data-detective` 子目录。已有同名目录时会报错退出，更新前先备份并移走原安装；卸载时移除该技能目录即可。
+
+安装仅复制运行资源，开发测试、演示文件、运行结果、缓存及 `.env` 不会进入精简安装。
+
+### 下载 ZIP 安装
+
+正式版本的精简包见 [GitHub Releases](https://github.com/MrBug1024/data-detective-skill/releases)。下载 `data-detective.zip`，解压后将其中的 `data-detective/` 放到宿主的 skills 目录，再为执行 CLI 的 Python 安装包内 `scripts/requirements.txt`。
+
+GitHub 的 “Source code” 是完整源码快照；Release 中的 `data-detective.zip` 才是精简技能包。尚无 Release 时使用上面的仓库链接或本地安装方式。
+
+## 使用
+
+安装后向 Codex 发送：
+
+```text
+$data-detective 核查这份结果表的第 2 行，结合我提供的源表和规则，列出字段来源、计算依据和无法确认的部分。
+```
+
+```text
+$data-detective 梳理这些记录中“张三”的提及，区分同名人物，保留标识冲突，并给出需要补证的关系。
+```
+
+```text
+$data-detective 根据我提供的现场描述和证词重建时间线，比较竞争解释，给出最优先的三项核查行动。
+```
+
+仅文字分析可以直接交给 Agent；运行本地 CLI 无需 API key。实际分析始终使用用户提供或已授权的材料。
+
+### 独立 CLI
+
+在源码根目录运行以下命令；安装后在自己的工作目录执行，并将 `scripts/` 替换为技能安装目录下的绝对路径。`--sources` 接收具体文件路径，不能依赖 shell 自动展开通配符。
+
+```sh
+# DATA：物理行号包含表头；多 sheet 时明确指定工作表
 python scripts/detective.py trace --result result.xlsx --row 2 --sheet Sheet1 --sources source.xlsx rules.md --out report.json --no-html
 
-# ENTITY：检索提及，保留同名/不同标识的歧义
-python scripts/detective.py investigate --mode entity --target 张三 --sources records.csv --out report.json --html wall.html
+# ENTITY：检索提及并保留身份歧义
+python scripts/detective.py investigate --mode entity --target 张三 --sources records.csv note.md --out report.json --html wall.html
 
-# DATA：依据实际规则编写计划，核验过滤/连接/聚合与十进制舍入
-python scripts/reconcile.py --plan lineage-plan.json --out reconciliation.json
+# CRIMINAL：生成证据包，随后由 Agent 完成研判
+python scripts/detective.py investigate --mode criminal --target 核验现场线索 --sources scene.md statements.txt --out packet.json --html wall.html
 
-# ENTITY：按报告coverage.next_start继续取尚未返回的命中
-python scripts/detective.py investigate --mode entity --target 张三 --sources records.csv --start 100 --limit 100 --out page2.json --no-html
-
-# CRIMINAL：生成来源可追溯的案件包，随后由Agent按SKILL完成研判
-python scripts/detective.py investigate --mode criminal --target 现场调查方向 --sources scene.md statements.txt --out packet.json --html wall.html
-
-# 以原模式、原配置和原来源加新材料重新核查
+# 按原模式、配置和来源加入新材料重新核查
 python scripts/detective.py validate --report report.json --new-evidence supplement.csv --out revised.json --no-html
 
-# Agent 按 portrait-input.schema.json 核对、提取原始描述后编译特征规格；不生成图片
+# 按明确规则重算，计划格式见 references/data-entity-workflows.md
+python scripts/reconcile.py --plan lineage-plan.json --out reconciliation.json
+
+# 编译面部特征规格；此命令不生成图片
 python scripts/detective.py portrait --case observations.json --out portrait.json --prompt-out portrait-prompt.txt
 ```
 
-`--sources` 使用明确路径。相对路径以当前目录为基准。若仅有文字描述，Agent 可以直接按刑侦参考分析，或存成 TXT/MD 后索引。
+可用源码内的合成样例快速验证：
 
-## 输出与边界
-
-| 模式 | 脚本实际完成 | Agent仍需完成 |
-|---|---|---|
-| DATA | 索引、候选匹配、字段证据/备选/覆盖；reconcile按显式计划重算 | 规则语义/适用版本、原始计算执行血缘验证 |
-| ENTITY | 目标提及、按标识声明分组、带来源属性、冲突与行内候选关系 | 跨页同名/别名消歧、有效期核查、真实关系验证 |
-| CRIMINAL | 证据账本、文件哈希、精确复制分组、时间声明、覆盖情况 | 竞争假说、ACH矩阵、专业证据解释与调查排序 |
-
-刑侦 CLI 不自动调用大模型，不会直接断定嫌疑人或补出心理画像。`evidence_packet_only` 表示尚待研判。Agent 的完成报告与原始包分开保存，格式见 [criminal-analysis.schema.json](schemas/criminal-analysis.schema.json)。检索分不等于概率；ENTITY/CRIMINAL 未评估的 `confidence` 为 `null`，展示“未评估”。
-
-足迹可支持花纹/尺寸/磨损等比较，不能由单枚鞋印可靠确定年龄、性别、体重；身高估计需要适配且验证过的模型与个体预测区间。心理与地理画像是线索生成工具，不能代替身份或罪责认定。
-
-面部规格中的 `specification_ready` 只表示可交付局部绘图要求，不代表重建真实脸；`render_state=not_generated` 保持实际状态。鞋印、作案手法、心理假说和祖源类别不能确定五官；低清增强生成的细节不能回填为原图证据。未知部位留白，证人冲突不平均，人物左右须核对。引文子串检查不验证语义或记忆准确性。
-
-CSV/TSV/TXT/MD/SQL静态解析使用Python标准库；XLSX依赖openpyxl，保留公式/缓存/地址且不计算公式；DOCX可读正文和表格；数字PDF提取带页码文本，表格列语义须另核。扫描件/图片接入绑定原图SHA256的OCR/视觉转录sidecar；本库不内置OCR引擎，图片尺寸检查使用Pillow。旧DOC明确需要可信转换；XLS需pandas/xlrd。无rapidfuzz时有字符串匹配回退，分数不能跨版本视为相同。没有语义嵌入模型或自动多跳搜索；`max_hops` 为保留配置。
-
-`reconcile.py` 支持精确等值筛选、显式连接基数、scalar/sum/count/min/max、十进制四则与汇总后舍入；拒绝重复唯一键、缺连接对象、任意代码及超预算连接。`reconciled_not_proven_lineage` 表示该计划重算相符，不能代替公式/代码/执行日志证明历史血缘。未知表达式或逐行舍入等规则需另写可审查计算，不能用近似规则替代。
-
-已支持类型解析失败或依赖缺失时会报错终止，避免将“文件没读成功”写成“没有证据”。空文档、扫描页、缺失文件和未支持类型仍须查看 `missing` 及覆盖提示。
-
-`ingestion` 按文件标complete/partial/unavailable；`coverage.ingestion_complete` 与候选搜索覆盖是不同维度。部分PDF、未核OCR、无缓存公式不会假称全部完成。来源与sidecar内容变化都会使索引缓存失效。
-
-## 控制规模与性能
-
-配置可通过 `--config config.json` 传入。`max_candidates` 为单次匹配全局候选上限；`criminal_max_units`/`criminal_max_chars` 默认100/1600；`entity_max_units` 默认100。`coverage` 和 `missing` 显式报告遗漏/截断，结论前须补读决定性材料。命中记录不重新解析；索引缓存按来源版本重用。不能将演示样例速度当作任意规模保证。
-
-DATA默认仍有模糊检索/文档提及检索预算，详见 `coverage.retrieval_limits/search_complete`。ENTITY可指定 `entity_identity_fields`，分组不把共享电话当唯一身份；分页分组只覆盖当前页。`field_aliases` 显式映射改名字段，避免跨角色ID仅因同值相连。
-
-## 测试
-
-```powershell
-python -m unittest discover -s tests -v
-python test/run_blind_eval.py
-python test/run_blind_eval.py --live --env-file tests/.env --out test/results/live.json
+```sh
+python scripts/detective.py trace --result examples/R1.xlsx --row 2 --sources examples/A.xlsx examples/B.xlsx examples/C.xlsx examples/D.xlsx examples/rules.md --out demo-report.json --no-html
 ```
 
-[盲测说明](test/README.md)：8个合成案件覆盖三种模式。被测模型只收到技能、相关参考与公开案情，隐藏规范仅本地评分；不向模型暴露文件系统。保存每案答卷、证据引用诊断、用时与token，机器检查后仍需独立语义复核。它是单轮文本评测，另有独立Agent前向验证；不把模拟通过数叫真实案件准确率。
+## 支持范围
 
-另有[6个画像专项盲测案件](test/portrait/README.md)。`test/portrait/check_outputs.py` 可核对保存答卷与公开原文、实际编译结果的一致性；语义判断和实际成图必须另行审查，不能用提示词检查冒充画像效果测试。
+支持 CSV/TSV/XLSX/TXT/MD、数字 PDF、DOCX 正文与表格，以及 SQL 静态字面量。扫描件和图片通过绑定原件哈希的 OCR/视觉转录 sidecar 接入；本库不自带 OCR 引擎。旧 DOC 需可信转换；旧 XLS 另装 `xlrd`。详情见[文件摄取与覆盖](references/file-ingestion.md)。
 
-本轮变更、113项回归、独立Agent测试与未验证范围见 [v3.1验证报告](outputs/portrait_validation/validation-report.md)。
+- 检索分用于排序候选，不能视为正确率或有罪概率。同名不自动合并为同人。
+- `evidence_packet_only` 表示证据整理包，Agent 仍需完成竞争假说、证据解释与调查计划，并另存分析报告。
+- `reconciled_not_proven_lineage` 仅证明指定计划重算相符；历史血缘仍需公式、代码或执行日志。
+- 检查 `coverage`、`missing` 及截断提示；ENTITY 可使用 `--start` / `--limit` 分页，不能只读首批就声称完整排查。
+- 面部规格与心理、地理画像只能生成待检验线索。低清增强生成的细节不能回填为原图证据。
 
-v3.2的跨格式CLI行为评测可重复运行：`python test/data_entity/run_eval.py --out-dir outputs/data_entity_validation/forward_eval`。它使用合成输入及本地隔离评分，不调用模型，不代表真实业务准确率。最终回归、性能和独立Agent实操见 [v3.2验证报告](outputs/data_entity_validation/validation-report.md)。
+模式细节见[数据与实体工作流](references/data-entity-workflows.md)、[刑侦工作流](references/criminal-workflow.md)及 [JSON schemas](schemas/)。旧 `--mode event` 保留为 `criminal` 的兼容别名。
 
-主要目录：`scripts/` 可重复执行工具，`references/` 按需专业工作流，`schemas/` 输出/配置约定，`tests/` 自动回归，`test/` 公开案件/隔离评分/模型评测。已有用户输出位于 `outputs/`，不属于基准答案。
+## 开发与验证
+
+```sh
+python -m pip install -r requirements-dev.txt
+python scripts/package_skill.py --check
+python -m unittest discover -s tests -v
+python scripts/package_skill.py --out dist/data-detective.zip
+```
+
+打包采用运行资源白名单，并生成 SHA-256 校验文件。CI 在 Windows 与 Linux 执行结构检查、回归测试和打包；测试只运行本地合成数据，不调用模型服务。
+
+另有[合成案件盲测](test/README.md)、[画像专项评测](test/portrait/README.md)与[跨格式行为评测](test/data_entity/README.md)。只有显式 `--live` 的模型盲测会联网并使用配置的模型服务；这些评测不构成真实案件准确率承诺。评分夹具不放进精简包，独立 Agent 测试需另外隔离评分材料。
+
+```text
+SKILL.md                技能入口与调用范围
+agents/openai.yaml      Codex 展示名称和默认提示
+scripts/                CLI、安装器、打包器
+references/             按需加载的专业工作流
+schemas/                输入、输出与配置约定
+examples/               可复现的合成样例（仅源码）
+tests/、test/            回归测试与评测材料（仅源码）
+.github/workflows/      CI 与 Release 自动化（仅源码）
+```
+
+## 发布版本
+
+先更新 `SKILL.md` 的 `metadata.version` 与本页版本号，运行上述检查并提交。推送与版本一致的标签即可触发 Release：
+
+```sh
+git tag v3.2.1
+git push origin main
+git push origin v3.2.1
+```
+
+也可以在 GitHub Actions 的 Release 工作流中手动填写已存在标签对应的版本发布。工作流核对版本、执行验证和测试，然后上传精简 ZIP 与 SHA-256；已存在的 Release 不会被覆盖。固定版本安装时可将 GitHub 链接指定为 `https://github.com/MrBug1024/data-detective-skill/tree/v3.2.1`，仓库内路径仍为 `.`，安装名称仍为 `data-detective`。
+
+## 许可证
+
+本项目采用 [Apache License 2.0](LICENSE)。

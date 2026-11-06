@@ -1,0 +1,4 @@
+-r scripts/requirements.txt
+# Repository validation and synthetic PDF fixtures; not needed by an installed skill.
+PyYAML>=6.0
+reportlab>=4.0

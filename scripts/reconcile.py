@@ -4,7 +4,6 @@ Matching finds candidates. This tool checks an agent/user supplied transformatio
 against source rows; arithmetic agreement does not prove historical execution.
 """
 import argparse
-import hashlib
 import json
 import sys
 from collections import defaultdict
@@ -13,6 +12,7 @@ from pathlib import Path
 
 from parsers import FileParser
 from indexer import value_text
+from ingestion_support import sha256_file
 
 
 class PlanError(ValueError):
@@ -143,11 +143,10 @@ def verify_plan(plan, base_dir=None):
         if path not in parsed:
             parsed[path] = fp.parse(path)
             ingestion[path] = list(getattr(fp, "last_diagnostics", []))
-            with open(path, "rb") as stream:
-                hashes[path] = hashlib.file_digest(stream, "sha256").hexdigest()
+            hashes[path] = sha256_file(path)
             sidecar = Path(path + '.ocr.json')
             if sidecar.is_file():
-                hashes[str(sidecar)] = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+                hashes[str(sidecar)] = sha256_file(sidecar)
         units = parsed[path]
         if ref.get("sheet") is not None:
             units = [u for u in units if u.sheet_name == ref["sheet"]]

@@ -5,7 +5,7 @@
 
 面向 Agent 的数据溯源、实体核查与刑侦分析 skill。把分散的表格、文档和现场描述整理成**可定位的证据、可比较的解释和可执行的核查计划**。
 
-支持 Codex 等遵循 Agent Skills 格式的宿主；提供 Claude Code 的本地目录安装。技能名为 **`data-detective`**，版本 **3.2.1**，入口为 [SKILL.md](SKILL.md)。Python CLI 负责确定性检索与整理，Agent 继续完成规则核验和分析。
+支持 Codex 等遵循 Agent Skills 格式的宿主；提供 Claude Code 的本地目录安装。技能名为 **`data-detective`**，版本 **3.2.2**，入口为 [SKILL.md](SKILL.md)。Python CLI 负责确定性检索与整理，Agent 继续完成规则核验和分析。
 
 | 模式 | 适用任务 | 输出 |
 |---|---|---|
@@ -27,6 +27,8 @@
 
 根目录就是 skill，必须将仓库根路径 `.` 和安装名 `data-detective` 一并指定。安装器的默认目录由当前 Codex 环境决定；可在下一轮输入 `$data-detective` 使用，未出现时重启宿主。参见 [Codex 官方 skills 文档](https://learn.chatgpt.com/docs/build-skills)。
 
+`skill-installer` 只复制技能文件。运行 CLI 前，为实际使用的 Python 安装技能目录中的 `scripts/requirements.txt`；仅文字分析无需这些 Python 依赖。
+
 ### 本地安装：Windows / macOS / Linux
 
 需要 Git 与 **Python 3.10+**。以下命令可在 PowerShell 或常见 Unix shell 中执行；`python` 不存在时使用本机的 `python3`。
@@ -46,7 +48,7 @@ python scripts/install_skill.py --target codex
 | Claude Code | `python scripts/install_skill.py --target claude` | `~/.claude/skills/data-detective/` |
 | 自定义 skills 目录 | `python scripts/install_skill.py --dest /path/to/skills` | `/path/to/skills/data-detective/` |
 
-Windows 上 `~` 对应当前用户目录。自定义路径有空格时加引号；`--dest` 指定 **skills 的父目录**，脚本会添加 `data-detective` 子目录。已有同名目录时会报错退出，更新前先备份并移走原安装；卸载时移除该技能目录即可。
+Windows 上 `~` 对应当前用户目录。自定义路径有空格时加引号；`--dest` 指定承载技能的 **skills 目录**（例如 `~/.agents/skills`），脚本会添加 `data-detective` 子目录。已有同名目录时会报错退出，更新前先备份并移走原安装；卸载时移除该技能目录即可。
 
 安装仅复制运行资源，开发测试、演示文件、运行结果、缓存及 `.env` 不会进入精简安装。
 
@@ -145,12 +147,12 @@ tests/、test/            回归测试与评测材料（仅源码）
 先更新 `SKILL.md` 的 `metadata.version` 与本页版本号，运行上述检查并提交。推送与版本一致的标签即可触发 Release：
 
 ```sh
-git tag v3.2.1
+git tag v3.2.2
 git push origin main
-git push origin v3.2.1
+git push origin v3.2.2
 ```
 
-也可以在 GitHub Actions 的 Release 工作流中手动填写已存在标签对应的版本发布。工作流核对版本、执行验证和测试，然后上传精简 ZIP 与 SHA-256；已存在的 Release 不会被覆盖。固定版本安装时可将 GitHub 链接指定为 `https://github.com/MrBug1024/data-detective-skill/tree/v3.2.1`，仓库内路径仍为 `.`，安装名称仍为 `data-detective`。
+也可以在 GitHub Actions 的 Release 工作流中手动填写已存在标签对应的版本发布。工作流核对版本、在 Python 3.10 和 3.13 上执行验证和测试，然后上传精简 ZIP 与 SHA-256；已存在的 Release 不会被覆盖。固定版本安装时可将 GitHub 链接指定为 `https://github.com/MrBug1024/data-detective-skill/tree/v3.2.2`，仓库内路径仍为 `.`，安装名称仍为 `data-detective`。
 
 ## 许可证
 

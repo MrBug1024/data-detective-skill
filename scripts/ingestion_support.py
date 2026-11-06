@@ -11,6 +11,15 @@ from bisect import bisect_right
 from pathlib import Path
 
 
+def sha256_file(filepath):
+    """Hash exact file bytes in bounded chunks, including on Python 3.10."""
+    digest = hashlib.sha256()
+    with open(filepath, 'rb') as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def read_text(filepath):
     data = Path(filepath).read_bytes()
     if data.startswith((b'\xff\xfe', b'\xfe\xff')):
@@ -33,8 +42,7 @@ def ocr_sidecar(filepath, page_count=None):
     if not path.is_file():
         return [], []
     data = json.loads(path.read_text(encoding='utf-8-sig'))
-    with open(filepath, 'rb') as handle:
-        digest = hashlib.file_digest(handle, 'sha256').hexdigest()
+    digest = sha256_file(filepath)
     if not isinstance(data, dict) or data.get('source_sha256') != digest:
         raise ValueError('OCR sidecar source_sha256 缺失或与原始文件不匹配')
     pages = data.get('pages')

@@ -3,7 +3,7 @@ name: data-detective
 description: 数据溯源与调查分析（data lineage, entity investigation, evidence analysis）。对文件与现场描述进行对账、血缘追踪、实体核查、案情分析与时间线重建，输出可定位证据、竞争解释和调查计划；有目击或影像材料时支持面部特征整理与合成画像流程。
 license: Apache-2.0
 metadata:
-  version: "3.2.1"
+  version: "3.2.2"
 ---
 
 # Data Detective：数据溯源 · 实体调查 · 刑侦模式

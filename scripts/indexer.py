@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional, Set
 from pathlib import Path
 
 from parsers import AddressableUnit, FileParser
+from ingestion_support import sha256_file
 
 
 def value_text(value: Any) -> str:
@@ -202,7 +203,6 @@ def _cache_key(source_files: List[str]) -> str:
         stat = os.stat(fp) if os.path.exists(fp) else None
         digest = 'missing'
         if stat and os.path.isfile(fp):
-            with open(fp, 'rb') as handle:
-                digest = hashlib.file_digest(handle, 'sha256').hexdigest()
+            digest = sha256_file(fp)
         parts.append(f"{fp}:{stat.st_mtime_ns if stat else 0}:{stat.st_size if stat else 0}:{digest}")
     return hashlib.md5("|".join(parts).encode()).hexdigest()[:12]

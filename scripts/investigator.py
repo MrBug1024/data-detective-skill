@@ -14,6 +14,7 @@ from linker import ChainLinker
 from entity_extractor import EntityExtractor
 from criminal import build_case_packet
 from entity_resolution import candidate_groups
+from ingestion_support import sha256_file
 
 
 def unit_location(unit):
@@ -104,11 +105,10 @@ class Investigator:
         derived = {}
         for filename in self._source_files:
             if os.path.isfile(filename):
-                with open(filename, "rb") as stream:
-                    snapshots[filename] = hashlib.file_digest(stream, "sha256").hexdigest()
+                snapshots[filename] = sha256_file(filename)
                 sidecar = Path(filename + '.ocr.json')
                 if sidecar.is_file():
-                    derived[str(sidecar)] = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+                    derived[str(sidecar)] = sha256_file(sidecar)
         inv.provenance = {"source_sha256": snapshots,
                           "derived_source_sha256": derived,
                           "dependency_status": "hashes_verify_bytes_not_truth_or_independence"}
@@ -123,8 +123,7 @@ class Investigator:
         self.load_sources(source_files)
         inv = self._report("data", f"{os.path.basename(result_file)} 第{result_row}行")
         inv.result_ref = {"file": result_file, "row": result_row, "sheet": result.sheet_name}
-        with open(result_file, "rb") as stream:
-            inv.result_ref["sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+        inv.result_ref["sha256"] = sha256_file(result_file)
         inv.result_ingestion_issues = result_diagnostics
         result_incomplete = any(i.get('severity') in ('warning', 'error') for i in result_diagnostics)
         if result_incomplete:

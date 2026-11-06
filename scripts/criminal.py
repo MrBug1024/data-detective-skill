@@ -6,6 +6,7 @@ from keyword hits. All evidence text is a source claim pending verification.
 import hashlib
 from collections import Counter
 from pathlib import Path
+from ingestion_support import sha256_file
 
 
 def _location(unit):
@@ -28,8 +29,7 @@ def build_case_packet(target, units, index, extractor, config=None):
     selected = ordered[:limit]
     file_hashes = {}
     for filename in dict.fromkeys(u.source_file for u in units):
-        with open(filename, "rb") as handle:
-            file_hashes[filename] = hashlib.file_digest(handle, "sha256").hexdigest()
+        file_hashes[filename] = sha256_file(filename)
     ledger, nodes, timeline = [], [], []
     group_counts = Counter()
     truncated = []

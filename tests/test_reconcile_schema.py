@@ -97,10 +97,10 @@ class ReconcilePlanSchemas(unittest.TestCase):
         self.assertEqual(['9.70', '2'], [c['calculated'] for c in report['checks']])
         self.assertEqual(3, report['result']['row'])
         self.assertEqual('B3', report['result']['metadata']['cells']['total']['address'])
-        self.assertEqual(str(self.base / 'results.xlsx'), report['result']['file'])
+        self.assertEqual(str((self.base / 'results.xlsx').resolve()), report['result']['file'])
         work_rows = [r for r in report['source_rows'] if r['source'] == 'work']
         self.assertEqual({4, 5}, {r['location']['row'] for r in work_rows})
-        self.assertTrue(all(r['location']['file'] == str(self.base / 'work.xlsx') for r in work_rows))
+        self.assertTrue(all(r['location']['file'] == str((self.base / 'work.xlsx').resolve()) for r in work_rows))
         costs = [r for r in report['source_rows'] if r['source'] == 'cost']
         self.assertEqual({'C3', 'C4'}, {r['location']['metadata']['cells']['unit_cost']['address'] for r in costs})
         scope = report['coverage']['source_queries']['source:work']
@@ -318,7 +318,7 @@ class ReconcilePlanSchemas(unittest.TestCase):
         self.assertEqual([4, 999, 3], [r['row'] for r in report['results']])
         self.assertEqual('9.10', report['results'][0]['report']['checks'][0]['calculated'])
         self.assertEqual('error', report['results'][1]['status'])
-        self.assertEqual(str(self.base / 'results.xlsx'), report['results'][1]['result']['file'])
+        self.assertEqual(str((self.base / 'results.xlsx').resolve()), report['results'][1]['result']['file'])
         self.assertEqual('9.70', report['results'][2]['report']['checks'][0]['calculated'])
         self.assertEqual(4, report['coverage']['loaded_ref_snapshots'])
 

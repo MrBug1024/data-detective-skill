@@ -4,19 +4,28 @@ Matching finds candidates. This tool checks an agent/user supplied transformatio
 against source rows; arithmetic agreement does not prove historical execution.
 """
 import argparse
+import hashlib
 import json
 import sys
 from collections import defaultdict
+from datetime import datetime, time
 from decimal import Decimal, DecimalException, Inexact, localcontext, ROUND_HALF_UP, ROUND_HALF_EVEN, ROUND_DOWN
 from pathlib import Path
 
-from parsers import FileParser
+from parsers import AddressableUnit, FileParser
 from indexer import value_text
 from ingestion_support import sha256_file
 
 
 class PlanError(ValueError):
     pass
+
+
+class _CachedSourceLoadError(PlanError):
+    """Re-raise a batch-local failure without retaining an exception/traceback."""
+    def __init__(self, error_type, message):
+        super().__init__(message)
+        self.original_error_type = error_type
 
 
 def number(value):
@@ -54,10 +63,49 @@ def validate_plan_shape(plan):
     def seq(value):
         if not isinstance(value, list): raise PlanError('计划集合必须为JSON数组')
         return value
+    def exact_scalar(value):
+        if not isinstance(value, (str, int, Decimal, bool, type(None))):
+            raise PlanError('query比较值必须是精确JSON标量；小数请用字符串或Decimal')
+        if isinstance(value, Decimal) and not value.is_finite():
+            raise PlanError('query数值必须有限')
+    def query(value):
+        obj(value, ('where', 'key_rows', 'columns', 'limit', 'reader', 'max_return_cells'), ())
+        if 'where' in value:
+            if not isinstance(value['where'], dict): raise PlanError('query.where必须为对象')
+            for name, allowed in value['where'].items():
+                text(name)
+                if not seq(allowed): raise PlanError('query.where的精确值数组不能为空')
+                for item in allowed: exact_scalar(item)
+        if 'key_rows' in value:
+            keys = seq(value['key_rows'])
+            if not keys: raise PlanError('query.key_rows不能为空')
+            names = None
+            for row in keys:
+                if not isinstance(row, dict) or not row: raise PlanError('query.key_rows每项须为非空字段对象')
+                for name, item in row.items(): text(name); exact_scalar(item)
+                if names is None: names = set(row)
+                elif set(row) != names: raise PlanError('query.key_rows每项必须使用相同字段组')
+        if 'columns' in value:
+            columns = seq(value['columns'])
+            if not columns: raise PlanError('query.columns不能为空')
+            for name in columns: text(name)
+            if len(set(columns)) != len(columns): raise PlanError('query.columns字段不能重复')
+        if 'limit' in value and (type(value['limit']) is not int or value['limit'] < 0):
+            raise PlanError('query.limit必须为非负整数')
+        if 'max_return_cells' in value and (type(value['max_return_cells']) is not int or value['max_return_cells'] < 1):
+            raise PlanError('query.max_return_cells必须为正整数')
+        if value.get('reader', 'auto') not in ('auto', 'fast', 'compatible'):
+            raise PlanError('query.reader须为auto/fast/compatible')
     def ref(value, required=('file',), extra=()):
-        obj(value, ('file', 'sheet', 'table') + tuple(extra), required)
+        obj(value, ('file', 'sheet', 'table', 'header_row', 'query') + tuple(extra), required)
         for k in ('file', 'sheet', 'table'):
             if k in value: text(value[k])
+        if 'header_row' in value and (type(value['header_row']) is not int or value['header_row'] < 1):
+            raise PlanError('header_row必须为正整数物理行号')
+        if 'query' in value: query(value['query'])
+        if 'header_row' in value or 'query' in value:
+            if Path(value['file']).suffix.lower() != '.xlsx' or 'table' in value:
+                raise PlanError('header_row/query仅支持XLSX工作表来源，不能同时指定table')
     def field(value):
         obj(value, ('source', 'field'), ('source', 'field'))
         text(value['source']); text(value['field'])
@@ -86,8 +134,20 @@ def validate_plan_shape(plan):
         elif not isinstance(predicate['literal'], (str, int, Decimal, bool, type(None))):
             raise PlanError('过滤literal必须是精确标量')
     for join in seq(plan.get('joins', [])):
-        obj(join, ('source', 'left', 'right_field', 'cardinality'), ('source', 'left', 'right_field', 'cardinality'))
-        text(join['source']); field(join['left']); text(join['right_field'])
+        obj(join, ('source', 'left', 'right_field', 'keys', 'cardinality'), ('source', 'cardinality'))
+        text(join['source'])
+        if join['cardinality'] not in ('one_to_one', 'many_to_one', 'one_to_many', 'many_to_many'):
+            raise PlanError('必须显式声明连接基数')
+        if 'keys' in join:
+            if 'left' in join or 'right_field' in join: raise PlanError('keys与旧单键left/right_field不能混用')
+            pairs = seq(join['keys'])
+            if not pairs: raise PlanError('复合连接keys不能为空')
+            for pair in pairs:
+                obj(pair, ('left', 'right_field'), ('left', 'right_field'))
+                field(pair['left']); text(pair['right_field'])
+        else:
+            if 'left' not in join or 'right_field' not in join: raise PlanError('缺少连接键')
+            field(join['left']); text(join['right_field'])
     for output in seq(plan['outputs']):
         obj(output, ('result_field', 'aggregate', 'expression', 'type', 'tolerance', 'quantize', 'rounding'), ('result_field',))
         text(output['result_field'])
@@ -128,48 +188,154 @@ def expression(expr, row, depth=0):
     return result
 
 
-def verify_plan(plan, base_dir=None):
+def _verify_plan(plan, base_dir=None, context=None):
     """All paths resolve relative to the plan file, never to a source instruction."""
     if not isinstance(plan, dict) or type(plan.get('version')) is not int or plan.get("version") != 1:
         raise PlanError("计划version必须为1")
     validate_plan_shape(plan)
     base = Path(base_dir or ".").resolve()
     resolve = lambda value: str((base / value).resolve())
-    fp = FileParser()
-    parsed, ingestion, hashes = {}, {}, {}
+    context = {} if context is None else context
+    if context.get('base', base) != base:
+        raise PlanError('批量核验上下文的计划目录不能变化')
+    context['base'] = base
+    if 'parser' not in context: context['parser'] = FileParser()
+    fp = context['parser']
+    parsed = context.setdefault('parsed', {})
+    ingestion = context.setdefault('ingestion', {})
+    hashes = context.setdefault('hashes', {})
+    source_queries = context.setdefault('source_queries', {})
 
-    def load(ref):
-        path = resolve(ref["file"])
-        if path not in parsed:
-            parsed[path] = fp.parse(path)
-            ingestion[path] = list(getattr(fp, "last_diagnostics", []))
-            hashes[path] = sha256_file(path)
+    def normalized_query(value):
+        if isinstance(value, Decimal): return str(value)
+        if isinstance(value, list): return [normalized_query(v) for v in value]
+        if isinstance(value, dict): return {k: normalized_query(v) for k, v in value.items()}
+        return value
+
+    def retain_hash(path, digest):
+        if path in hashes and hashes[path] != digest:
+            raise PlanError('同次核验中来源文件发生变化，不能合并不同快照')
+        hashes[path] = digest
+
+    def read_source(ref, role, path, streamed, query, key):
+        if key not in parsed:
+            if streamed:
+                from xlsx_query import query_xlsx
+                packet = query_xlsx(path, sheet=ref.get('sheet'), header_row=ref.get('header_row', 1),
+                                    **query, cache_dir=base / '.dd_cache' / 'xlsx_query')
+                retain_hash(path, packet['source_sha256'])
+                issues = [{**issue, 'severity': 'error' if issue.get('code') == 'excel_error_cell' else 'warning'}
+                          for issue in packet.get('issues', [])]
+                coverage = packet['coverage']
+                for flag, required_value, code in (
+                    ('scan_complete', True, 'query_scan_incomplete'),
+                    ('truncated', False, 'query_rows_truncated'),
+                    ('filter_evaluation_complete', True, 'query_filter_evaluation_incomplete'),
+                ):
+                    if coverage.get(flag) != required_value:
+                        issues.append({'code': code, 'severity': 'warning', 'coverage': coverage})
+                if coverage.get('expression_provenance_complete') is False:
+                    issues.append({'code': 'query_formula_expression_provenance_incomplete', 'severity': 'warning'})
+                units = []
+                for row in packet['rows']:
+                    cells = row['cells']
+                    for cell in cells.values():
+                        present = cell.get('formula_present', cell.get('formula') is not None)
+                        if present and not cell.get('formula_cached'):
+                            issues.append({'code': 'formula_missing_cache', 'severity': 'warning',
+                                           'row_num': row['row_num'], 'address': cell['address']})
+                        if present and cell.get('formula_expression_complete') is False:
+                            issues.append({'code': 'formula_expression_unavailable', 'severity': 'warning',
+                                           'row_num': row['row_num'], 'address': cell['address']})
+                    fields = list(packet['columns'])
+                    values = []
+                    for field in fields:
+                        value = row['values'][field]
+                        cell = cells[field]
+                        # Match FileParser's datetime/time semantics across
+                        # readers and Excel epochs. Keep the original serial
+                        # and explicit epoch untouched in metadata.cells.
+                        if cell.get('iso_value') is not None:
+                            try:
+                                value = datetime.fromisoformat(cell['iso_value'])
+                            except ValueError:
+                                value = time.fromisoformat(cell['iso_value'])
+                        values.append(value)
+                    identity = json.dumps([path, packet['sheet'], row['row_num']], ensure_ascii=False)
+                    units.append(AddressableUnit(
+                        unit_id=hashlib.sha256(identity.encode('utf-8')).hexdigest()[:24],
+                        source_file=path, file_type='xlsx', row_num=row['row_num'], page_num=None,
+                        paragraph_num=None, char_offset=None, sheet_name=packet['sheet'],
+                        field_names=fields, field_values=values,
+                        raw_text=' | '.join(f'{field}={value}' for field, value in zip(fields, values) if value is not None),
+                        metadata={'cells': cells, 'location_kind': 'excel_physical_row',
+                                  'reader': 'xlsx_query', 'header_row': packet['header_row'],
+                                  'source_sha256': packet['source_sha256'], 'date_epoch': packet.get('date_epoch'),
+                                  'ingestion_scope': 'explicit_query_filters_and_projected_columns'},
+                    ))
+                scope = {
+                    'file': path, 'sheet': packet['sheet'], 'header_row': packet['header_row'],
+                    'query': query, 'projected_columns': packet['columns'], 'coverage': coverage,
+                    'source_sha256': packet['source_sha256'], 'cache': packet.get('cache'),
+                    'elapsed_seconds': packet.get('elapsed_seconds'),
+                    'scope': 'explicit_query_subset; plan_filters_apply_after_query',
+                    'business_population_completeness_proven': False,
+                    'scope_review_required': bool(query.get('where') or query.get('key_rows') or query.get('columns')),
+                }
+                parsed[key] = (units, scope)
+            else:
+                units = fp.parse(path)
+                issues = list(getattr(fp, 'last_diagnostics', []))
+                parsed[key] = (units, None)
+                retain_hash(path, sha256_file(path))
+            ingestion.setdefault(path, []).extend(issues)
             sidecar = Path(path + '.ocr.json')
             if sidecar.is_file():
-                hashes[str(sidecar)] = sha256_file(sidecar)
-        units = parsed[path]
+                retain_hash(str(sidecar), sha256_file(sidecar))
+        units, scope = parsed[key]
+        if scope is not None:
+            source_queries[role] = scope
         if ref.get("sheet") is not None:
             units = [u for u in units if u.sheet_name == ref["sheet"]]
         if ref.get("table") is not None:
             units = [u for u in units if u.metadata.get("table", u.sheet_name) == ref["table"]]
         return units
 
+    def load(ref, role):
+        path = resolve(ref['file'])
+        streamed = 'header_row' in ref or 'query' in ref
+        query = normalized_query(ref.get('query', {}))
+        key = ('xlsx_query', path, ref.get('sheet'), ref.get('header_row', 1),
+               json.dumps(query, ensure_ascii=False, sort_keys=True, separators=(',', ':'))) if streamed else ('file', path)
+        # Keep only an opaque ref/query key plus type/message. No exception,
+        # traceback, source rows, or query scalar values enter the failure cache.
+        failure_key = hashlib.sha256(json.dumps(key, ensure_ascii=False).encode('utf-8')).hexdigest()
+        failures = context.setdefault('load_errors', {})
+        if failure_key in failures:
+            failure = failures[failure_key]
+            raise _CachedSourceLoadError(failure['type'], failure['message']) from None
+        try:
+            return read_source(ref, role, path, streamed, query, key)
+        except (KeyError, TypeError, ValueError, RuntimeError, OSError, DecimalException) as exc:
+            failures[failure_key] = {'type': type(exc).__name__, 'message': str(exc)}
+            raise
+
     result_ref = plan["result"]
-    results = [u for u in load(result_ref) if u.row_num == result_ref["row"]]
+    results = [u for u in load(result_ref, 'result') if u.row_num == result_ref["row"]]
     if len(results) != 1:
         raise PlanError("结果行必须唯一；明确工作表/表名及物理行号")
     result = results[0]
     rule_evidence = []
-    for anchor in plan.get("rule_evidence", []):
+    for rule_index, anchor in enumerate(plan.get("rule_evidence", [])):
         quote = anchor.get("quote", "")
         if not isinstance(quote, str) or not quote.strip():
             raise PlanError("规则引文不能为空")
-        matches = [u for u in load(anchor) if quote in u.raw_text]
+        matches = [u for u in load(anchor, f'rule_evidence:{rule_index}') if quote in u.raw_text]
         if not matches:
             raise PlanError("规则引文未在指定来源中找到")
         rule_evidence.append({"quote": quote, "locations": [location(u) for u in matches],
                               "validation": "substring_only_semantics_requires_review"})
-    sources = {alias: [u for u in load(ref) if not u.is_rule and not u.metadata.get('is_header_row')]
+    sources = {alias: [u for u in load(ref, f'source:{alias}') if not u.is_rule and not u.metadata.get('is_header_row')]
                for alias, ref in plan["sources"].items()}
     selection = plan["select"]
     alias = selection["source"]
@@ -196,24 +362,38 @@ def verify_plan(plan, base_dir=None):
     if len(rows) > limit:
         raise PlanError("过滤结果超过max_join_rows；请缩小范围")
     joins = []
+    bound_sources = {alias}
     for join in plan.get("joins", []):
         right = join["source"]
-        left = join["left"]
+        keys = join.get('keys', [{'left': join.get('left'), 'right_field': join.get('right_field')}])
         cardinality = join["cardinality"]
-        if right not in sources or (rows and right in rows[0]):
+        if right not in sources or right in bound_sources:
             raise PlanError("join来源未知或别名已使用")
         if cardinality not in ("one_to_one", "many_to_one", "one_to_many", "many_to_many"):
             raise PlanError("必须显式声明连接基数")
+        if any(pair['left']['source'] not in bound_sources for pair in keys):
+            raise PlanError("连接左侧来源未出现")
+
+        def tuple_key(values):
+            # Keep tuple boundaries. Concatenating keys would conflate (A, BC)
+            # with (AB, C), or delimiter-bearing identifiers with other records.
+            if any(value is None or value_text(value) == '' for value in values):
+                return None
+            return tuple(value_text(value) for value in values)
+
         lookup = defaultdict(list)
+        unavailable_right_keys = 0
         for unit in sources[right]:
-            key = get_value(unit, join["right_field"])
-            if key is not None: lookup[value_text(key)].append(unit)
+            key = tuple_key([get_value(unit, pair['right_field']) for pair in keys])
+            if key is None:
+                unavailable_right_keys += 1
+            else:
+                lookup[key].append(unit)
         new_rows, seen_left, missing = [], set(), 0
         for row in rows:
-            if left["source"] not in row:
-                raise PlanError("连接左侧来源未出现")
-            key = get_value(row[left["source"]], left["field"])
-            key = None if key is None else value_text(key)
+            key = tuple_key([get_value(row[pair['left']['source']], pair['left']['field']) for pair in keys])
+            if key is None:
+                raise PlanError('连接左键缺失/为空，不能把空键当成相同对象')
             matches = lookup.get(key, [])
             if cardinality in ("one_to_one", "many_to_one") and len(matches) > 1:
                 raise PlanError("连接右键不唯一，违反声明基数；不能重复计入金额")
@@ -225,10 +405,13 @@ def verify_plan(plan, base_dir=None):
                 raise PlanError("连接结果超过max_join_rows；未静默截断")
             new_rows.extend({**row, right: unit} for unit in matches)
         joins.append({"source": right, "cardinality": cardinality,
-                      "input_rows": len(rows), "output_rows": len(new_rows), "unmatched_rows": missing})
+                      "keys": keys, "key_comparison": "componentwise_tuple; value_text normalization; no concatenation",
+                      "input_rows": len(rows), "output_rows": len(new_rows), "unmatched_rows": missing,
+                      "unavailable_right_key_rows": unavailable_right_keys})
         if missing:
             raise PlanError(f"{missing}条记录缺连接对象；不能以内连接静默丢失")
         rows = new_rows
+        bound_sources.add(right)
     checks = []
     outputs = plan["outputs"]
     if not isinstance(outputs, list) or not outputs:
@@ -307,7 +490,60 @@ def verify_plan(plan, base_dir=None):
             "result": location(result), "source_sha256": hashes, "rule_evidence": rule_evidence,
             "checks": checks, "joins": joins, "source_rows": list(citations.values()),
             "coverage": {"joined_rows": len(rows), "input_units": {k: len(v) for k,v in sources.items()},
-                         "ingestion_complete": not incomplete}, "ingestion_issues": incomplete}
+                         "ingestion_complete": not incomplete, "source_queries": source_queries,
+                         "query_scope_semantics": "query filters/projection are explicit extraction choices; completeness of business selection is not proven"},
+            "ingestion_issues": incomplete}
+
+
+def verify_plan(plan, base_dir=None):
+    """Recompute one result row; retain the original single-row API."""
+    return _verify_plan(plan, base_dir=base_dir)
+
+
+def verify_plan_batch(plan, rows, base_dir=None):
+    """Recompute requested physical rows against one shared set of source reads.
+
+    Only result.row varies. Explicit source queries may batch all required keys;
+    they are loaded once per unique reference/query within this invocation.
+    Every requested row receives either a report or an explicit error record.
+    """
+    if not isinstance(plan, dict): raise PlanError('计划必须为JSON对象')
+    if not isinstance(rows, (list, tuple)) or not rows:
+        raise PlanError('批量rows必须为非空物理行号数组')
+    context, results, statuses = {}, [], defaultdict(int)
+    requested = list(rows)
+    original_ref = plan.get('result', {})
+    batch_base = Path(base_dir or '.').resolve()
+    for request_index, row in enumerate(requested):
+        ref = {**original_ref, 'row': row} if isinstance(original_ref, dict) else {'row': row}
+        row_plan = {**plan, 'result': ref}
+        try:
+            report = _verify_plan(row_plan, base_dir=base_dir, context=context)
+        except (KeyError, TypeError, ValueError, RuntimeError, OSError, DecimalException) as exc:
+            failed_ref = {k: ref.get(k) for k in ('file', 'sheet', 'table', 'row') if k in ref}
+            if isinstance(failed_ref.get('file'), str):
+                failed_ref['file'] = str((batch_base / failed_ref['file']).resolve())
+            results.append({'request_index': request_index, 'row': row, 'status': 'error',
+                            'result': failed_ref,
+                            'error': str(exc), 'error_type': getattr(exc, 'original_error_type', type(exc).__name__),
+                            'confidence': None})
+        else:
+            statuses[report['status']] += 1
+            results.append({'request_index': request_index, 'row': row, 'status': 'processed', 'report': report})
+    processed = sum(item['status'] == 'processed' for item in results)
+    failed = len(results) - processed
+    return {
+        'status': 'batch_processed_with_errors' if failed else 'batch_processed',
+        'analysis_stage': 'deterministic_reconciliation_batch', 'confidence': None,
+        'semantics': 'processing_status_only; inspect_every_row_report; not_proof_of_historical_lineage',
+        'summary': {'requested_rows': len(requested), 'processed_rows': processed,
+                    'failed_rows': failed, 'report_status_counts': dict(statuses)},
+        'results': results, 'source_sha256': dict(context.get('hashes', {})),
+        'coverage': {'requested_physical_rows': requested, 'loaded_ref_snapshots': len(context.get('parsed', {})),
+                     'failed_ref_snapshots': len(context.get('load_errors', {})),
+                     'source_queries': dict(context.get('source_queries', {})),
+                     'source_read_semantics': 'one_load_per_unique_file_or_explicit_query_in_this_batch'},
+    }
 
 
 def main():
@@ -317,15 +553,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument('--rows', nargs='+', type=int,
+                        help='Batch physical result rows, sharing source reads and exact query caches')
     args = parser.parse_args()
     try:
-        report = verify_plan(json.loads(args.plan.read_text(encoding="utf-8-sig"), parse_float=Decimal), args.plan.resolve().parent)
+        plan = json.loads(args.plan.read_text(encoding="utf-8-sig"), parse_float=Decimal)
+        report = (verify_plan_batch(plan, args.rows, args.plan.resolve().parent) if args.rows is not None
+                  else verify_plan(plan, args.plan.resolve().parent))
     except (KeyError, TypeError, ValueError, RuntimeError, OSError, DecimalException) as exc:
         report = {"status": "invalid_or_unavailable", "error": str(exc), "confidence": None}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
     print(report["status"])
-    if report["status"] == "invalid_or_unavailable":
+    if report["status"] == "invalid_or_unavailable" or report.get('summary', {}).get('failed_rows', 0):
         raise SystemExit(2)
 
 

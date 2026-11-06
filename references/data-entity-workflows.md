@@ -16,12 +16,12 @@
 
 先检查工作表维度、前几行、真实表头和解压后的工作表大小。首行可能只是“附件”或标题，不能当作字段行；明确 `header_row`，保留原物理行号。旧 `trace` 会构造全量行对象和索引，超过其解压 XML 预算时应改用定向读取，不能靠提高候选上限解决。
 
-`scripts/xlsx_query.py` 流式扫描一个工作表，仅保留精确筛选命中的记录。先从整份结果收集稳定键的去重集合，写到查询 JSON；同一字段的列表是 OR，不同字段之间是 AND。每个源表按整批键查询一次，不要对40个结果行重复启动40次全表扫描。用 `--columns` 只投影本轮连接和核算所需字段；不要将大份逐格证据JSON整体读入模型上下文。明确选择字段角色，跨表同名“数据唯一记录号”可能属于不同表，不能直接连接。用明细的记录键定位结果行，再用结算/业务单据键连接主表，必要时继续用就诊/事件键连接另一来源。
+`scripts/xlsx_query.py` 流式扫描一个工作表，仅保留精确筛选命中的记录。先从整份结果收集稳定键的去重集合，写到查询 JSON；同一字段的列表是 OR，不同字段之间是 AND。每个源表按整批键查询一次，不要按结果行重复启动全表扫描。用 `--columns` 只投影本轮连接和核算所需字段；不要将大份逐格证据JSON整体读入模型上下文。明确字段角色，同名字段在不同表中可能指向不同对象，不能直接连接。连接顺序来自当前材料的键关系和规则，不固定源表数量、名称或层数。
 
 ```bash
 # 只探查前几行和维度，不全扫工作表
 python scripts/xlsx_query.py --file detail.xlsx --inspect --header-rows 5 --out schema.json
-# keys.json 例：{"结算ID": ["SYNTHETIC-001", "SYNTHETIC-002"]}
+# keys.json 例：{"record_key": ["EXAMPLE-A", "EXAMPLE-B"]}；列名取自实际表头
 python scripts/xlsx_query.py --file detail.xlsx --where-json keys.json --out matched-detail.json
 # 标题占前两行时明确选第3行作为字段行
 python scripts/xlsx_query.py --file rules.xlsx --header-row 3 --out rules.json
@@ -33,11 +33,19 @@ python scripts/xlsx_query.py --file rules.xlsx --header-row 3 --out rules.json
 
 用 `cache.hit` 区分复用，`elapsed_seconds` 记录本次调用，`cold_scan_elapsed_seconds` 记录原始扫描。不要把缓存命中耗时当首次扫描速度；CLI 还需写输出文件，评测时应另计完整运行时间。来源文件变化或筛选变化会重新查询。
 
-`--limit` 只限制返回记录，仍扫描整个工作表以报告命中和截断；检查 `coverage.scan_complete/filter_evaluation_complete/truncated`。`structure_validation_scope` 说明只对表头、筛选单元格和返回记录验证结构，不表示审查了未命中的所有字段。默认不限制命中数量，筛选前评估键集合与预期行数；匹配规模过大时分组查询或采用磁盘中间表。
+`--limit` 只限制返回记录，仍扫描整个工作表以报告命中和截断；检查 `coverage.scan_complete/filter_evaluation_complete/truncated`。`structure_validation_scope` 说明只对表头、筛选单元格和返回记录验证结构，不表示审查了未命中的所有字段。默认返回证据预算为500,000个投影单元格，超预算明确失败且不缓存半成品；通过更精确的键、字段投影或分批缩小范围，资源允许时可显式设 `--max-return-cells`。不要因换一种结构而退回无限制全表驻留内存。
 
 每个结果行至少保存：唯一/歧义匹配数、明细和关联主表位置、字段映射及转换、实际执行的重算、规则原文位置和未决项。逐字段区分直接复制、改名、日期格式化、码值翻译、舍入和派生。代码转名称需要原系统码表；不可把观察到的对应关系冒称字典核验。
 
 涉及重复收费、同日事件或组合条件时，用完整键组内的全部相关明细核对触发条件及对照项，不能只取最高分候选。金额分摊应从原始金额与比例输入重算；显示到两位的比例不一定是原计算使用的完整精度。候选公式即使逐行相符，也应与有原代码/日志支持的历史血缘区分。规则版本与费用/事件发生期间须另核对。
+
+### 结构适配与通用边界
+
+字段名示例不构成默认模式。先确定每行代表订单、交易、事件、版本还是汇总，再明确实际字段映射及唯一/复合键。宽表、长明细、多个工作表和多层关联均由显式计划声明；不能将一个行业的分组条件、字典或公式当作通用规则。
+
+多组复合键必须按完整元组匹配。`where={"tenant":["A","B"],"item":["X","Y"]}` 是两个独立的 IN 条件，包含交叉组合；若实际只要 `(A,X)` 和 `(B,Y)`，应使用 `key_rows=[{"tenant":"A","item":"X"},{"tenant":"B","item":"Y"}]` 或 CLI `--keys-json`，再与 `where` 的额外条件取 AND。
+
+矩形表可用显式 `header_row` 处理标题行；多级合并表头、交叉透视布局、嵌套JSON、动态SQL等不应伪装成普通单表。先按当前材料做可审查的结构化适配，保留原件、原位置、映射和覆盖；未完成适配时明确未核验。文字、DOCX、PDF和SQL的格式边界见[文件摄取](file-ingestion.md)。支持读取文件不等于已支持其中任意业务逻辑。
 
 ### 从候选到确定性重算
 
@@ -59,6 +67,21 @@ python scripts/xlsx_query.py --file rules.xlsx --header-row 3 --out rules.json
 ```
 
 支持精确筛选、显式基数连接、scalar/sum/count/min/max、十进制add/sub/mul/div和汇总后显式舍入。表达式是JSON白名单，无eval/SQL执行。重复唯一键、缺连接对象、空值数值或超预算会拒绝核验，不能静默丢行/重复计额。标识比较保留前导零。规则引文只作原文存在检查，Agent仍须核实其语义与适用版本。
+
+复合连接用 `keys` 字段数组声明完整元组，与旧单键 `left/right_field` 语法二选一。例如：
+
+```json
+{"source":"rates","keys":[
+  {"left":{"source":"lines","field":"tenant"},"right_field":"tenant"},
+  {"left":{"source":"lines","field":"item"},"right_field":"sku"}
+],"cardinality":"many_to_one"}
+```
+
+XLSX 的 result/source 引用可显式提供 `header_row`，或在 `query` 对象中提供 `where`、`key_rows`、`columns`、`limit`、`reader`、`max_return_cells`。这会直接查询原始文件并复用计划目录的 `.dd_cache/xlsx_query/`，将原始行和单元格证据接入重算；不需要导出成丢失原行号的中间CSV。配置不可覆盖 file/sheet/header/cache 的边界。`coverage.source_queries` 保留查询范围和截断/缓存状态；过滤作用域仍需按当前规则审查，不能将数值相等当作业务筛选完整或历史执行已证实。
+
+整份结果沿用同一映射/计算计划时，使用批量入口 `python scripts/reconcile.py --plan plan.json --rows 2 3 4 --out batch.json`，Python 对应 `verify_plan_batch(plan, rows, base_dir)`。整批共享原件读取、哈希和相同来源查询上下文；计划内的来源筛选应包含本批所有需要的键。每个请求行均保留报告或明确错误，不把 `batch_processed` 当作核验通过；读取每行的 `equal/mismatch/incomplete` 及证据等级。
+
+共享/数组等公式不能只看缓存值就声称已还原表达式。从属共享公式保留原 `t/si/ref` 和缺口；缓存值可供数值比对，但无缓存或表达式未解析必须在覆盖和结论中说明。
 
 当前工具不支持任意Excel/SQL表达式、窗口函数、模糊连接、逐行舍入、时效区间/汇率自动选择。遇到这些情况写专门可审查脚本或使用已授权可信计算引擎，保留输入/单位/规则位置和中间值；不能偷换成工具现有算式。`reconciled_not_proven_lineage` 表示所给计划数值相符，缺规则为 `incomplete`，不等为 `mismatch`，不等于历史上执行过该计划。完成DATA分析至少保存：字段映射与键基数、实际规则出处、重算检查、竞争候选/反证、覆盖缺口和血缘结论的证据等级。
 

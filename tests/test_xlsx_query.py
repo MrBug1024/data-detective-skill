@@ -142,6 +142,20 @@ class StreamingQueryTests(unittest.TestCase):
             query_xlsx(path)
         self.assertEqual(query_xlsx(path, sheet='Other')['rows'][0]['values']['ID'], 'x')
 
+    def test_shared_underscore_escape_preserves_literal_key_without_recursive_decoding(self):
+        path = self.workbook([
+            row(1, '<c r="A1" t="s"><v>0</v></c>'),
+            row(2, '<c r="A2" t="s"><v>1</v></c>'),
+        ], strings='<si><t>ID</t></si><si><t>ABC_x005F_x0041_</t></si>')
+        for reader in ('fast', 'compatible'):
+            result = query_xlsx(path, where={'ID': ['ABC_x0041_']}, reader=reader)
+            self.assertEqual(result['coverage']['matched_rows'], 1)
+            self.assertEqual(result['rows'][0]['values']['ID'], 'ABC_x0041_')
+            self.assertEqual(result['rows'][0]['cells']['ID']['raw_value'], '1')
+            self.assertEqual(query_xlsx(path, where={'ID': ['ABCA']}, reader=reader)['rows'], [])
+        sample = inspect_xlsx(path, header_rows=2)
+        self.assertEqual(sample['sheets'][0]['rows'][1]['values']['A'], 'ABC_x0041_')
+
     def test_duplicate_empty_and_unlabelled_headers_fail(self):
         for rows, error in [
             ([row(1, text_cell('A1', 'ID'), text_cell('B1', 'ID'))], 'Duplicate header'),
@@ -364,6 +378,183 @@ class StreamingQueryTests(unittest.TestCase):
         frames = list(xlsx_query._framed_rows(TinyChunks(content)))
         self.assertEqual([number for number, _, _ in frames], [1, 2])
         self.assertEqual(xlsx_query._parse_frame(frames[1][1], frames[1][2]).attrib['r'], '2')
+
+    def compound_fixture(self):
+        return self.workbook([
+            row(1, text_cell('A1', 'tenant'), text_cell('B1', 'sku'), text_cell('C1', 'status'), text_cell('D1', 'amount')),
+            row(2, text_cell('A2', 'A'), text_cell('B2', 'X'), text_cell('C2', 'open'), number_cell('D2', '10.00')),
+            row(3, text_cell('A3', 'A'), text_cell('B3', 'Y'), text_cell('C3', 'open'), number_cell('D3', '20.00')),
+            row(4, text_cell('A4', 'B'), text_cell('B4', 'X'), text_cell('C4', 'open'), number_cell('D4', '30.00')),
+            row(5, text_cell('A5', 'B'), text_cell('B5', 'Y'), text_cell('C5', 'closed'), number_cell('D5', '40.00')),
+        ])
+
+    def test_complete_compound_keys_exclude_cross_pairs_and_combine_with_where(self):
+        source = self.compound_fixture()
+        keys = [{'tenant': 'A', 'sku': 'X'}, {'tenant': 'B', 'sku': 'Y'}]
+        fast = query_xlsx(source, key_rows=keys, columns=['amount'], reader='fast')
+        compatible = query_xlsx(source, key_rows=keys, columns=['amount'], reader='compatible')
+        self.assertEqual(fast['rows'], compatible['rows'])
+        self.assertEqual(fast['coverage'], compatible['coverage'])
+        self.assertEqual([record['row_num'] for record in fast['rows']], [2, 5])
+        self.assertEqual([record['values']['amount'] for record in fast['rows']], ['10.00', '40.00'])
+        constrained = query_xlsx(source, key_rows=keys, where={'status': ['open']}, columns=['amount'])
+        self.assertEqual([record['row_num'] for record in constrained['rows']], [2])
+        # A same-named where field is an additional AND condition.
+        same_field = query_xlsx(source, key_rows=keys, where={'tenant': ['B']})
+        self.assertEqual([record['row_num'] for record in same_field['rows']], [5])
+
+    def test_compound_key_order_duplicates_and_field_order_share_cache(self):
+        source = self.compound_fixture()
+        cache = self.root / 'cache'
+        keys = [{'tenant': 'A', 'sku': 'X'}, {'tenant': 'B', 'sku': 'Y'}]
+        cold = query_xlsx(source, key_rows=keys, cache_dir=cache)
+        with mock.patch.object(xlsx_query, '_query_xlsx_core', side_effect=AssertionError('tuple reorder must reuse cache')):
+            warm = query_xlsx(source, key_rows=[{'sku': 'Y', 'tenant': 'B'}, {'sku': 'X', 'tenant': 'A'}, keys[0]], cache_dir=cache)
+        self.assertTrue(warm['cache']['hit'])
+        self.assertEqual(warm['cache']['key'], cold['cache']['key'])
+        self.assertEqual(warm['rows'], cold['rows'])
+        ordinary = query_xlsx(source, where={'tenant': ['A']}, cache_dir=cache)
+        with mock.patch.object(xlsx_query, '_query_xlsx_core', side_effect=AssertionError('None must not change ordinary signature')):
+            ordinary_again = query_xlsx(source, where={'tenant': ['A']}, key_rows=None, cache_dir=cache)
+        self.assertTrue(ordinary_again['cache']['hit'])
+        self.assertEqual(ordinary_again['cache']['key'], ordinary['cache']['key'])
+
+    def test_compound_keys_validate_shape_and_fields(self):
+        source = self.compound_fixture()
+        invalid = ([], {}, {'tenant': 'A'}, [None], [{}], [{'tenant': 'A'}, {'sku': 'X'}], [{'tenant': ['A']}])
+        for keys in invalid:
+            with self.subTest(keys=keys):
+                with self.assertRaisesRegex(ValueError, 'key_rows'):
+                    query_xlsx(source, key_rows=keys)
+        with self.assertRaisesRegex(ValueError, 'Unknown column'):
+            query_xlsx(source, key_rows=[{'unknown': 'A'}])
+
+    def test_compound_key_cli_takes_a_json_array(self):
+        source = self.compound_fixture()
+        keys = self.root / 'keys.json'
+        keys.write_text(json.dumps([{'tenant': 'A', 'sku': 'X'}]), encoding='utf-8')
+        output = self.root / 'tuple-result.json'
+        run = subprocess.run([sys.executable, str(ROOT / 'scripts/xlsx_query.py'), '--file', str(source), '--keys-json', str(keys), '--columns', 'amount', '--no-cache', '--out', str(output)], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        result = json.loads(output.read_text(encoding='utf-8'))
+        self.assertEqual([record['row_num'] for record in result['rows']], [2])
+
+    def test_shared_formula_attributes_and_unresolved_expression_remain_visible(self):
+        source = self.workbook([
+            row(1, text_cell('A1', 'ID'), text_cell('B1', 'Total')),
+            row(2, text_cell('A2', 'root'), '<c r="B2"><f t="shared" ref="B2:B4" si="0">A2*2</f><v>20</v></c>'),
+            row(3, text_cell('A3', 'cached'), '<c r="B3"><f t="shared" si="0"/><v>40</v></c>'),
+            row(4, text_cell('A4', 'missing'), '<c r="B4"><f t="shared" si="0"/></c>'),
+        ])
+        fast = query_xlsx(source, reader='fast')
+        compatible = query_xlsx(source, reader='compatible')
+        self.assertEqual(fast['rows'], compatible['rows'])
+        self.assertEqual(fast['coverage'], compatible['coverage'])
+        root, cached, missing = [record['cells']['Total'] for record in fast['rows']]
+        self.assertEqual(root['formula'], '=A2*2')
+        self.assertEqual(root['formula_attributes'], {'t': 'shared', 'ref': 'B2:B4', 'si': '0'})
+        self.assertTrue(root['formula_expression_complete'])
+        self.assertTrue(cached['formula_present'])
+        self.assertIsNone(cached['formula'])
+        self.assertEqual(cached['formula_state'], 'shared_formula_unresolved')
+        self.assertFalse(cached['formula_expression_complete'])
+        self.assertEqual(cached['value'], '40')
+        self.assertTrue(cached['formula_cached'])
+        self.assertFalse(missing['formula_cached'])
+        self.assertFalse(fast['coverage']['expression_provenance_complete'])
+        self.assertEqual(fast['coverage']['unresolved_formula_expressions'], 2)
+        self.assertEqual(fast['coverage']['issue_counts']['formula_missing_cache'], 1)
+        unknown = query_xlsx(source, where={'Total': [None]})
+        self.assertEqual(unknown['coverage']['matched_rows'], 0)
+        self.assertFalse(unknown['coverage']['filter_evaluation_complete'])
+        self.assertEqual(unknown['coverage']['unavailable_filter_rows'], 1)
+        tuple_unknown = query_xlsx(source, key_rows=[{'ID': 'missing', 'Total': None}])
+        self.assertEqual(tuple_unknown['coverage']['matched_rows'], 0)
+        self.assertFalse(tuple_unknown['coverage']['filter_evaluation_complete'])
+
+    def test_typed_filter_fast_path_matches_numeric_inline_zero_formats_and_blank_cells(self):
+        source = self.workbook([
+            row(1, text_cell('A1', 'ID'), text_cell('B1', 'Amount')),
+            row(2, number_cell('A2', '7', 1), number_cell('B2', '12.3000000000001')),
+            row(3, '<c r="A3" s="&#49;"><v>8</v></c>', number_cell('B3', '20')),
+            row(4, '<c r="A4" t="inlineStr"><is><r><t>00</t></r><r><t>09</t></r></is></c>', number_cell('B4', '30')),
+            row(5, '<c r="A5" t="b"><v>1</v></c>', number_cell('B5', '40')),
+            row(6, '<c r="A6"><v></v></c>', number_cell('B6', '50')),
+        ])
+        for values in (['0007', '0008', '0009', True], [None]):
+            with self.subTest(values=values):
+                fast = query_xlsx(source, where={'ID': values}, reader='fast')
+                compatible = query_xlsx(source, where={'ID': values}, reader='compatible')
+                self.assertEqual(fast['rows'], compatible['rows'])
+                self.assertEqual(fast['coverage'], compatible['coverage'])
+        selected = query_xlsx(source, key_rows=[{'ID': '0008', 'Amount': '20'}], columns=['Amount'])
+        self.assertEqual(selected['rows'][0]['row_num'], 3)
+
+    def test_other_quoted_attribute_values_cannot_impersonate_cell_type_or_row_address(self):
+        source = self.workbook([
+            row(1, text_cell('A1', 'ID')),
+            row(2, number_cell('A2', '7')),
+        ])
+        def add_attributes(data):
+            data = data.replace(f'xmlns="{M}"'.encode(), f'xmlns="{M}" xmlns:x="urn:attributes"'.encode())
+            data = data.replace(b'<row r="2">', b'<row x:note=" r=\'9\' " r="2">')
+            return data.replace(b'<c r="A2" s="0">', b'<c x:note=" t=\'s\' r=\'A9\' " r="A2" s="0">')
+        self.rewrite_sheet(source, add_attributes)
+        fast = query_xlsx(source, where={'ID': ['7']}, reader='fast')
+        compatible = query_xlsx(source, where={'ID': ['7']}, reader='compatible')
+        self.assertEqual(fast['rows'], compatible['rows'])
+        self.assertEqual(fast['coverage'], compatible['coverage'])
+        self.assertEqual(fast['rows'][0]['row_num'], 2)
+
+    def test_return_cell_budget_refuses_partial_output_and_cache_bypass(self):
+        source = self.simple()  # Three source rows and three columns.
+        cache = self.root / 'budget-cache'
+        with self.assertRaisesRegex(ValueError, 'Returned cell budget exceeded'):
+            query_xlsx(source, max_return_cells=8, cache_dir=cache)
+        self.assertFalse(cache.exists())
+        complete = query_xlsx(source, max_return_cells=9, cache_dir=cache)
+        self.assertEqual(complete['coverage']['returned_cells'], 9)
+        cache_file = Path(complete['cache']['path'])
+        payload = json.loads(cache_file.read_text(encoding='utf-8'))
+        payload['result']['rows'].append(payload['result']['rows'][0])
+        cache_file.write_text(json.dumps(payload), encoding='utf-8')
+        with mock.patch.object(xlsx_query, '_query_xlsx_core', side_effect=AssertionError('invalid warm cache must not trigger an unbounded rescan')):
+            with self.assertRaisesRegex(ValueError, 'Returned cell budget exceeded'):
+                query_xlsx(source, max_return_cells=9, cache_dir=cache)
+
+    def test_projection_and_return_limit_fit_budget_without_stopping_scan(self):
+        source = self.simple()
+        projected = query_xlsx(source, columns=['ID'], max_return_cells=3)
+        self.assertEqual(projected['coverage']['scanned_rows'], 3)
+        self.assertEqual(projected['coverage']['matched_rows'], 3)
+        self.assertEqual(projected['coverage']['returned_cells'], 3)
+        self.assertFalse(projected['coverage']['truncated'])
+        limited = query_xlsx(source, limit=1, max_return_cells=3)
+        self.assertEqual(limited['coverage']['scanned_rows'], 3)
+        self.assertEqual(limited['coverage']['matched_rows'], 3)
+        self.assertEqual(limited['coverage']['returned_rows'], 1)
+        self.assertEqual(limited['coverage']['returned_cells'], 3)
+        self.assertTrue(limited['coverage']['scan_complete'])
+        self.assertTrue(limited['coverage']['truncated'])
+        zero = query_xlsx(source, limit=0, max_return_cells=1)
+        self.assertEqual(zero['coverage']['returned_cells'], 0)
+        self.assertEqual(zero['coverage']['matched_rows'], 3)
+        cache = self.root / 'different-budgets'
+        one = query_xlsx(source, columns=['ID'], max_return_cells=3, cache_dir=cache)
+        two = query_xlsx(source, columns=['ID'], max_return_cells=4, cache_dir=cache)
+        self.assertNotEqual(one['cache']['key'], two['cache']['key'])
+        self.assertFalse(two['cache']['hit'])
+
+    def test_return_cell_budget_requires_a_positive_integer(self):
+        source = self.simple()
+        for budget in (None, 0, -1, True, False, 1.5, '100'):
+            with self.subTest(budget=budget):
+                with self.assertRaisesRegex(ValueError, 'max_return_cells must be a positive integer'):
+                    query_xlsx(source, max_return_cells=budget)
+        output = self.root / 'must-not-exist.json'
+        run = subprocess.run([sys.executable, str(ROOT / 'scripts/xlsx_query.py'), '--file', str(source), '--max-return-cells', '0', '--no-cache', '--out', str(output)], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 2)
+        self.assertFalse(output.exists())
 
 
 if __name__ == '__main__':

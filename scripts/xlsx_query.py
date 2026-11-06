@@ -29,11 +29,24 @@ MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 M = "{" + MAIN + "}"
 REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 ADDRESS = re.compile(r"([A-Z]+)([1-9][0-9]*)\Z")
-READER_VERSION = "xlsx-query-v4-validated-frames-canonical-content-cache"
+READER_VERSION = "xlsx-query-v7-bounded-typed-tuples-formula-content-cache"
 
 
 class _UnsupportedFrames(ValueError):
     """Valid XML outside the deliberately limited fast-framing layout."""
+
+
+class _ReturnCellBudgetError(ValueError):
+    """A complete query cannot retain its requested output within the budget."""
+
+
+def _check_return_cell_budget(row_count, column_count, maximum):
+    if row_count * column_count > maximum:
+        raise _ReturnCellBudgetError(
+            f"Returned cell budget exceeded (max_return_cells={maximum}). "
+            "Use more precise where/key_rows, fewer projected columns, a return limit, "
+            "or process explicit key batches; no partial result was returned or cached."
+        )
 
 
 def _reject_declaration(*args):
@@ -80,6 +93,14 @@ _ROW_FRAME = re.compile(rb'<row(?=[\s/>])(?P<attrs>(?:\s+[A-Za-z_][\w:.-]*\s*=\s
 _PREFIXED_TAG = re.compile(rb'</?[A-Za-z_][\w.-]*:')
 _ATTRIBUTE = rb'[A-Za-z_][\w:.-]*\s*=\s*(?:"[^"]*"|\'[^\']*\')'
 _ROW_NUMBER = re.compile(rb'(?:^|\s)r\s*=\s*(?:"([1-9][0-9]*)"|\'([1-9][0-9]*)\')')
+_ATTRIBUTE_PARTS = re.compile(rb'\s+([A-Za-z_][\w:.-]*)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
+
+
+def _raw_attributes(serialization):
+    # Consume complete quoted values so text inside another attribute cannot
+    # masquerade as the r/t/s attribute used by the lexical optimization.
+    return {match.group(1): match.group(2) if match.group(2) is not None else match.group(3)
+            for match in _ATTRIBUTE_PARTS.finditer(serialization)}
 
 
 def _framed_rows(stream):
@@ -169,10 +190,10 @@ def _framed_rows(stream):
                 if raw.count(b'<row') > 1:
                     raise _UnsupportedFrames("Nested row elements require the compatible XML reader")
                 attrs = frame.group('attrs')
-                number = _ROW_NUMBER.search(attrs)
-                if number is None:
+                number = _raw_attributes(attrs).get(b'r')
+                if number is None or not number.isdigit() or int(number) < 1:
                     raise _UnsupportedFrames("Rows without explicit physical addresses require the compatible reader")
-                row_number = int(number.group(1) or number.group(2))
+                row_number = int(number)
                 yield row_number, raw, root_open
                 consumed = frame.end()
             buffer = buffer[consumed:]
@@ -198,18 +219,22 @@ def _parse_frame(raw, root_open):
     return root[0]
 
 
-def _prefilter_spec(column, allowed, strings):
-    # Only shared-string cells can be rejected without decoding a row. Numeric,
-    # inline-string, formula and missing cells are decoded by the normal path.
+def _prefilter_spec(column, allowed, strings, style_ids, custom_formats, epoch_1904):
     target = column.encode('ascii') + rb'[1-9][0-9]*'
     selector = re.compile(rb'<c(?:\s+' + _ATTRIBUTE + rb')*?\s+r\s*=\s*(?:"' + target + rb'"|\'' + target + rb'\')(?:\s+' + _ATTRIBUTE + rb')*\s*(?:/>|>.*?</c\s*>)', re.DOTALL)
     allowed_indices = {str(index).encode('ascii') for index, value in enumerate(strings)
                        if _exact(value) in allowed}
-    return selector, allowed_indices, len(strings), column
+    return {"selector": selector, "allowed_indices": allowed_indices,
+            "string_count": len(strings), "column": column, "allowed": allowed,
+            "strings": strings, "style_ids": style_ids,
+            "custom_formats": custom_formats, "epoch_1904": epoch_1904}
 
 
-def _can_reject_frame(raw, specification, row_num):
-    selector, allowed_indices, string_count, column = specification
+def _can_reject_frame(raw, specification, row_num, root_open):
+    selector = specification['selector']
+    allowed_indices = specification['allowed_indices']
+    string_count = specification['string_count']
+    column = specification['column']
     found = selector.search(raw)
     if found is None:
         return False
@@ -232,21 +257,46 @@ def _can_reject_frame(raw, specification, row_num):
         return False
     cell = found.group()
     opening = re.match(rb'<c(?:\s+' + _ATTRIBUTE + rb')*\s*/?>', cell)
-    if opening is None or re.search(rb'(?:^|\s)t\s*=\s*(?:"s"|\'s\')(?=\s|/|>)', opening.group()) is None:
+    if opening is None:
         return False
-    actual_address = re.search(rb'\sr\s*=\s*(?:"([A-Z]+[1-9][0-9]*)"|\'([A-Z]+[1-9][0-9]*)\')', opening.group())
-    if actual_address is None or (actual_address.group(1) or actual_address.group(2)) != expected_address:
+    attributes = _raw_attributes(opening.group())
+    if attributes.get(b'r') != expected_address:
         return False
     if b'<f' in cell:
         return False
-    value = re.search(rb'<v\s*>([0-9]+)</v\s*>', cell)
-    if value is None:
+    kind = attributes.get(b't', b'n')
+    if kind == b's':
+        value = re.search(rb'<v\s*>([0-9]+)</v\s*>', cell)
+        if value is not None:
+            index = int(value.group(1))
+            if not 0 <= index < string_count:
+                return False
+            return str(index).encode('ascii') not in allowed_indices
+    if kind == b'n':
+        # General-format numeric XML already is the exact value returned by
+        # _cell. A formatting-sensitive number takes the one-cell XML path.
+        style_text = attributes.get(b's', b'0')
+        style = int(style_text) if style_text.isdigit() else None
+        style_ids = specification['style_ids']
+        value = re.search(rb'<v\s*>([^<&]*)</v\s*>', cell)
+        if style is not None and 0 <= style < len(style_ids) and style_ids[style] in (None, 0) and value is not None and value.group(1):
+            return value.group(1).decode('utf-8') not in specification['allowed']
+    # Decode only this cell with the same namespace and value decoder used by
+    # the full reader. Inline rich text, zero formats, dates and booleans retain
+    # identical semantics, without constructing every unrelated cell in a row.
+    fragment = (root_open + f'<row r="{row_num}">'.encode('ascii') + cell
+                + b'</row></worksheet>')
+    try:
+        row = ET.fromstring(fragment)[0]
+    except ET.ParseError:
         return False
-    index = int(value.group(1))
-    if not 0 <= index < string_count:
+    if len(row) != 1 or row[0].tag != M + 'c':
         return False
-    canonical = str(index).encode('ascii')
-    return canonical not in allowed_indices
+    decoded = _cell(row[0], specification['strings'], specification['style_ids'],
+                    specification['custom_formats'], specification['epoch_1904'])
+    if _has_formula(decoded) or decoded['data_type'] == 'e':
+        return False
+    return _exact(decoded['value']) not in specification['allowed']
 
 
 def _text(element):
@@ -259,7 +309,11 @@ def _text(element):
             parts.append(child.text or "")
         elif child.tag == M + "r":
             parts.extend(node.text or "" for node in child if node.tag == M + "t")
-    return "".join(parts)
+    text = "".join(parts)
+    # Shared-string exports escape a literal underscore before an _xNNNN_
+    # sequence. Decode that escape once; never recursively interpret the
+    # resulting literal key as another escape. Inline text stays unchanged.
+    return text.replace("_x005F_", "_") if element.tag == M + "si" else text
 
 
 def _elements(stream, tag):
@@ -346,7 +400,16 @@ def _cell(element, strings, style_ids, custom_formats, epoch_1904):
     value_node = element.find(M + "v")
     raw = value_node.text if value_node is not None else None
     formula_node = element.find(M + "f")
-    formula = None if formula_node is None else "=" + (formula_node.text or "")
+    formula_present = formula_node is not None
+    formula_attributes = dict(formula_node.attrib) if formula_present else {}
+    expression = formula_node.text if formula_present else None
+    formula = "=" + expression if expression else None
+    if not formula_present:
+        formula_state = None
+    elif formula_attributes.get('t') == 'shared':
+        formula_state = 'shared_formula_root' if expression else 'shared_formula_unresolved'
+    else:
+        formula_state = 'literal_expression' if expression else 'formula_expression_unavailable'
     style_id = int(element.attrib.get("s", "0"))
     if not 0 <= style_id < len(style_ids):
         raise ValueError(f"Invalid style reference at {address}: {style_id}")
@@ -368,7 +431,11 @@ def _cell(element, strings, style_ids, custom_formats, epoch_1904):
         value = raw
     result = {"address": address, "value": value, "raw_value": raw,
               "data_type": kind, "style_id": style_id, "formula": formula,
-              "formula_cached": formula is not None and raw is not None}
+              "formula_present": formula_present,
+              "formula_attributes": formula_attributes,
+              "formula_state": formula_state,
+              "formula_expression_complete": bool(expression) if formula_present else None,
+              "formula_cached": formula_present and raw is not None}
     format_id = style_ids[style_id]
     if kind != "n" or raw is None:
         # Text/boolean/error content is independent of Excel number formats.
@@ -511,8 +578,43 @@ def _exact(value):
     return str(value)
 
 
+def _has_formula(cell):
+    return cell.get('formula_present', cell.get('formula') is not None)
+
+
+def _blank_cell(address):
+    return {"address": address, "value": None, "raw_value": None,
+            "data_type": "blank", "style_id": 0, "formula": None,
+            "formula_present": False, "formula_attributes": {}, "formula_state": None,
+            "formula_expression_complete": None, "formula_cached": False}
+
+
+def _canonical_key_rows(key_rows):
+    """Canonical OR-of-complete-tuples, never independent column IN lists."""
+    if key_rows is None:
+        return None
+    if not isinstance(key_rows, list) or not key_rows:
+        raise ValueError("key_rows must be a nonempty list of nonempty dictionaries")
+    fields = None
+    tuples = set()
+    for item in key_rows:
+        if not isinstance(item, dict) or not item or any(not isinstance(k, str) or not k for k in item):
+            raise ValueError("Each key_rows item must be a nonempty dictionary with nonempty field names")
+        current_fields = sorted(item)
+        if fields is None:
+            fields = current_fields
+        elif current_fields != fields:
+            raise ValueError("All key_rows dictionaries must contain exactly the same fields")
+        if any(value is not None and not isinstance(value, (str, int, float, bool)) for value in item.values()):
+            raise ValueError("key_rows values must be JSON scalars; use strings for exact identifiers and decimals")
+        tuples.add(tuple(_exact(item[field]) for field in fields))
+    ordered = sorted(tuples, key=lambda values: tuple((v is not None, str(v)) for v in values))
+    return [dict(zip(fields, values)) for values in ordered]
+
+
 def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1,
-                     limit=None, progress=None, reader="compatible"):
+                     limit=None, progress=None, reader="compatible", key_rows=None,
+                     max_return_cells=500000):
     """Return exact matches after scanning the selected sheet completely.
 
     ``where`` maps column labels to allowed exact values; fields use AND and
@@ -528,6 +630,8 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
         raise ValueError("header_row must be a positive physical row number")
     if limit is not None and (type(limit) is not int or limit < 0):
         raise ValueError("limit must be a nonnegative integer or None")
+    if type(max_return_cells) is not int or max_return_cells < 1:
+        raise ValueError("max_return_cells must be a positive integer")
     where = {} if where is None else where
     if not isinstance(where, dict) or any(not isinstance(k, str) or not k for k in where):
         raise ValueError("where must map nonempty column labels to lists of exact values")
@@ -536,6 +640,9 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
     if any(isinstance(value, (list, dict)) for values in where.values() for value in values):
         raise ValueError("where lists may contain only scalar exact values")
     allowed = {key: {_exact(value) for value in values} for key, values in where.items()}
+    tuple_fields = sorted(key_rows[0]) if key_rows is not None else []
+    allowed_tuples = {tuple(_exact(item[field]) for field in tuple_fields) for item in (key_rows or [])}
+    tuple_unions = {field: {_exact(item[field]) for item in key_rows} for field in tuple_fields}
     if columns is not None and (not isinstance(columns, (list, tuple)) or not columns
                                 or any(not isinstance(c, str) or not c for c in columns)
                                 or len(set(columns)) != len(columns)):
@@ -618,12 +725,15 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
                         raise ValueError("The selected header row is empty")
                     requested = list(header) if columns is None else list(columns)
                     header_columns = set(header.values())
-                    unknown = (set(allowed) | set(requested)) - set(header)
+                    unknown = (set(allowed) | set(requested) | set(tuple_fields)) - set(header)
                     if unknown:
                         raise ValueError("Unknown column labels: " + ", ".join(sorted(unknown)))
                     if reader == "fast" and allowed:
                         label = next(iter(allowed))
-                        prefilter = _prefilter_spec(header[label], allowed[label], strings)
+                        prefilter = _prefilter_spec(header[label], allowed[label], strings, style_ids, custom_formats, epoch_1904)
+                    elif reader == "fast" and tuple_fields:
+                        label = tuple_fields[0]
+                        prefilter = _prefilter_spec(header[label], tuple_unions[label], strings, style_ids, custom_formats, epoch_1904)
                     continue
                 if header is None:
                     raise ValueError(f"Header physical row {header_row} was not found")
@@ -636,7 +746,7 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
                 if progress is not None and scanned % 50000 == 0:
                     progress(scanned)
                 if element is None:
-                    if prefilter is not None and _can_reject_frame(raw_frame, prefilter, row_num):
+                    if prefilter is not None and _can_reject_frame(raw_frame, prefilter, row_num, root_open):
                         continue
                     element = _parse_frame(raw_frame, root_open)
                 decoded = {}
@@ -648,14 +758,14 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
                     address = f"{col}{row_num}"
                     source_cell = locate(element, address)
                     if source_cell is None:
-                        value = {"address": f"{col}{row_num}", "value": None,
-                                 "raw_value": None, "data_type": "blank", "style_id": 0,
-                                 "formula": None, "formula_cached": False}
+                        value = _blank_cell(address)
                     else:
                         value = _cell(source_cell, strings, style_ids, custom_formats, epoch_1904)
                     decoded[label] = value
-                    if value["formula"] is not None and not value["formula_cached"]:
+                    if _has_formula(value) and not value["formula_cached"]:
                         issue("formula_missing_cache", row_num, value["address"])
+                    if value.get('formula_state') in ('shared_formula_unresolved', 'formula_expression_unavailable'):
+                        issue(value['formula_state'], row_num, value['address'])
                     if value["data_type"] == "e":
                         issue("excel_error_cell", row_num, value["address"])
                     return value
@@ -663,7 +773,7 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
                 accepts = True
                 for label, values in allowed.items():
                     cell = read(label)
-                    if (cell["formula"] is not None and not cell["formula_cached"]) or cell["data_type"] == "e":
+                    if (_has_formula(cell) and not cell["formula_cached"]) or cell["data_type"] == "e":
                         missing_filter_cache += 1
                         accepts = False
                         break
@@ -672,8 +782,24 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
                         break
                 if not accepts:
                     continue
+                if tuple_fields:
+                    tuple_values = []
+                    for label in tuple_fields:
+                        cell = read(label)
+                        if (_has_formula(cell) and not cell["formula_cached"]) or cell["data_type"] == "e":
+                            missing_filter_cache += 1
+                            accepts = False
+                            break
+                        value = _exact(cell["value"])
+                        if value not in tuple_unions[label]:
+                            accepts = False
+                            break
+                        tuple_values.append(value)
+                    if not accepts or tuple(tuple_values) not in allowed_tuples:
+                        continue
                 matched += 1
                 if limit is None or len(rows) < limit:
+                    _check_return_cell_budget(len(rows) + 1, len(requested), max_return_cells)
                     cells = _row_cells(element, row_num)
                     if any(column not in header_columns and (c.find(M + "v") is not None or c.find(M + "is") is not None
                                                            or c.find(M + "f") is not None)
@@ -695,20 +821,27 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
     final = file.stat()
     if (before.st_size, before.st_mtime_ns) != (final.st_size, final.st_mtime_ns):
         raise ValueError("Source file changed while hashing; repeat against a stable snapshot")
-    return {"file": str(file), "sheet": sheet, "header_row": header_row,
+    result = {"file": str(file), "sheet": sheet, "header_row": header_row,
             "source_sha256": digest.hexdigest(), "columns": requested,
             "where": where, "rows": rows,
             "coverage": {"scanned_rows": scanned, "matched_rows": matched,
                          "returned_rows": len(rows), "truncated": len(rows) < matched,
+                         "returned_cells": len(rows) * len(requested),
+                         "max_return_cells": max_return_cells,
                          "scan_complete": True,
                          "filter_evaluation_complete": missing_filter_cache == 0,
                          "unavailable_filter_rows": missing_filter_cache,
+                         "expression_provenance_complete": not any(issue_counts.get(code, 0) for code in ('shared_formula_unresolved', 'formula_expression_unavailable')),
+                         "unresolved_formula_expressions": sum(issue_counts.get(code, 0) for code in ('shared_formula_unresolved', 'formula_expression_unavailable')),
                          "structure_validation_scope": "header_filter_cells_and_returned_rows",
                          "xml_well_formedness": "complete_worksheet",
                          "issue_counts": issue_counts, "issue_details_truncated": sum(issue_counts.values()) > len(issues)},
             "issues": issues, "elapsed_seconds": round(time.perf_counter() - started, 3),
             "reader": "validated_row_frames" if reader == "fast" else "compatible_xml",
             "date_epoch": "1904" if epoch_1904 else "1900"}
+    if key_rows is not None:
+        result['key_rows'] = key_rows
+    return result
 
 
 def _source_digest(file):
@@ -724,7 +857,8 @@ def _source_digest(file):
 
 
 def query_xlsx(file, *, sheet=None, where=None, columns=None, header_row=1,
-               limit=None, progress=None, reader="auto", cache_dir=None):
+               limit=None, progress=None, reader="auto", cache_dir=None, key_rows=None,
+               max_return_cells=500000):
     """Scan one worksheet once for an entire list of exact keys.
 
     ``where={field: [key1, key2, ...]}`` batches all keys into one scan. Fields
@@ -732,6 +866,8 @@ def query_xlsx(file, *, sheet=None, where=None, columns=None, header_row=1,
     decompression on repeated queries while hashing source bytes on every call.
     Reader auto uses validated frame prefiltering for filtered queries and
     automatically retries supported XML with the compatible reader when needed.
+    ``max_return_cells`` bounds retained rows times projected columns; exceeding
+    it fails explicitly, without returning or caching a partial result.
     """
     started = time.perf_counter()
     file = Path(file).expanduser().resolve()
@@ -750,7 +886,10 @@ def query_xlsx(file, *, sheet=None, where=None, columns=None, header_row=1,
         raise ValueError("columns must contain distinct nonempty column labels")
     if type(header_row) is not int or header_row < 1 or (limit is not None and (type(limit) is not int or limit < 0)):
         raise ValueError("Invalid header_row or limit")
+    if type(max_return_cells) is not int or max_return_cells < 1:
+        raise ValueError("max_return_cells must be a positive integer")
     columns = list(columns) if columns is not None else None
+    key_rows = _canonical_key_rows(key_rows)
     digest = _source_digest(file)
     # OR values have set semantics. Reordering/deduplicating a result table's
     # keys must not turn the same source query into another full XML scan.
@@ -760,8 +899,11 @@ def query_xlsx(file, *, sheet=None, where=None, columns=None, header_row=1,
     signature = {"file": os.path.normcase(str(file)), "source_sha256": digest,
                  "sheet": sheet, "header_row": header_row, "where": signature_where,
                  "columns": columns, "limit": limit, "reader": reader,
+                 "max_return_cells": max_return_cells,
                  "reader_version": READER_VERSION,
                  "validation": "complete_xml_no_dtd_header_filter_returned_cells"}
+    if key_rows is not None:
+        signature['key_rows'] = key_rows
     key = hashlib.sha256(json.dumps(signature, sort_keys=True, ensure_ascii=False, allow_nan=False,
                                     separators=(',', ':')).encode('utf-8')).hexdigest()
     cache_file = None
@@ -773,24 +915,29 @@ def query_xlsx(file, *, sheet=None, where=None, columns=None, header_row=1,
                 if cached.get('signature') == signature and isinstance(cached.get('result'), dict):
                     result = cached['result']
                     if result.get('source_sha256') == digest and result.get('coverage', {}).get('scan_complete') is True:
+                        _check_return_cell_budget(len(result.get('rows', [])), len(result.get('columns', [])), max_return_cells)
                         result['elapsed_seconds'] = round(time.perf_counter() - started, 3)
                         result['cache'] = {"enabled": True, "hit": True, "key": key,
                                            "path": str(cache_file), "reader_version": READER_VERSION}
                         result['where'] = where or {}
                         return result
+            except _ReturnCellBudgetError:
+                raise
             except (OSError, ValueError, TypeError):
                 pass
-    selected_reader = "fast" if reader == "fast" or (reader == "auto" and where) else "compatible"
+    selected_reader = "fast" if reader == "fast" or (reader == "auto" and (where or key_rows)) else "compatible"
     fallback_reason = None
     try:
         result = _query_xlsx_core(file, sheet=sheet, where=where, columns=columns,
                                   header_row=header_row, limit=limit, progress=progress,
-                                  reader=selected_reader)
+                                  reader=selected_reader, key_rows=key_rows,
+                                  max_return_cells=max_return_cells)
     except _UnsupportedFrames as exc:
         fallback_reason = str(exc)
         result = _query_xlsx_core(file, sheet=sheet, where=where, columns=columns,
                                   header_row=header_row, limit=limit, progress=progress,
-                                  reader="compatible")
+                                  reader="compatible", key_rows=key_rows,
+                                  max_return_cells=max_return_cells)
     if result['source_sha256'] != digest:
         raise ValueError("Source file changed during query; no result was cached")
     if fallback_reason is not None:
@@ -826,25 +973,34 @@ def main(argv=None):
     parser.add_argument("--header-rows", type=int, default=5, help="Physical sample-row limit for --inspect (default 5)")
     parser.add_argument("--sheet")
     parser.add_argument("--where-json", type=Path, help="JSON object mapping fields to lists of exact values")
+    parser.add_argument("--keys-json", type=Path, help="JSON array of complete composite-key dictionaries (OR tuples, AND with where)")
     parser.add_argument("--columns", nargs="+")
     parser.add_argument("--header-row", type=int, default=1)
     parser.add_argument("--limit", type=int, help="Maximum returned rows; the whole sheet is still scanned")
+    parser.add_argument("--max-return-cells", type=int, default=500000,
+                        help="Maximum retained rows times projected columns (default 500000)")
     parser.add_argument("--reader", choices=("auto", "fast", "compatible"), default="auto")
     parser.add_argument("--cache-dir", type=Path, default=Path('.dd_cache/xlsx_query'))
     parser.add_argument("--no-cache", action="store_true", help="Disable the content-keyed query cache")
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args(argv)
     if args.inspect and (args.where_json is not None or args.columns is not None
+                         or args.keys_json is not None
                          or args.limit is not None or args.sheet is not None or args.header_row != 1):
         parser.error("--inspect samples all sheets; use --header-rows, without query filters")
     try:
         where = json.loads(args.where_json.read_text(encoding="utf-8-sig")) if args.where_json else None
+        key_rows = json.loads(args.keys_json.read_text(encoding="utf-8-sig")) if args.keys_json else None
         result = inspect_xlsx(args.file, header_rows=args.header_rows) if args.inspect else query_xlsx(args.file, sheet=args.sheet, where=where,
                             columns=args.columns, header_row=args.header_row, limit=args.limit,
                             reader=args.reader, cache_dir=None if args.no_cache else args.cache_dir,
+                            key_rows=key_rows,
+                            max_return_cells=args.max_return_cells,
                             progress=lambda count: print(f"Scanned {count} rows", file=sys.stderr, flush=True))
         output = args.out.expanduser().resolve()
-        if output == args.file.expanduser().resolve() or (args.where_json and output == args.where_json.expanduser().resolve()):
+        if (output == args.file.expanduser().resolve()
+                or (args.where_json and output == args.where_json.expanduser().resolve())
+                or (args.keys_json and output == args.keys_json.expanduser().resolve())):
             raise ValueError("Output must not overwrite the workbook or filter input")
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.suffix.lower() == ".jsonl":

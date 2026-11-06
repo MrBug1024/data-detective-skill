@@ -39,16 +39,16 @@ metadata:
 
 DATA/ENTITY 跨格式任务先读[文件摄取与覆盖](references/file-ingestion.md)。脚本的 `candidate_links` 与 `mentions_only_identity_unresolved` 都是中间阶段；Agent须继续核对规则/身份、处理覆盖缺口，保存独立的完成分析。不能把候选分数或文件扩展名支持当成调查已完成。
 
-DATA 输入大型 XLSX 或含标题/合并表头的工作簿时，先探查工作表、真实表头和稳定键，按[大表定向溯源](references/data-entity-workflows.md#大型-xlsx-与整份结果溯源)使用 `scripts/xlsx_query.py`。不要先把整批大表交给 `trace` 建内存索引。用户要求核对整份结果时，处理全部结果行，并保留每行来源和核算状态；不能只验证一行作为完成依据。
+DATA 先适配当前材料的结构：识别记录粒度、真实表头、键的角色及基数、字段映射和计算规则，不预设行业、列名、源表数量或连接顺序。输入大型 XLSX 或含标题行的工作簿时，按[大表定向溯源](references/data-entity-workflows.md#大型-xlsx-与整份结果溯源)使用 `scripts/xlsx_query.py`。不要先把整批大表交给 `trace` 建内存索引。用户要求核对整份结果时，处理全部结果行，并保留每行来源和核算状态；不能只验证一行作为完成依据。未支持的布局/表达式需要保留原位置的显式适配和验证，不能硬套演示字段或把缺口当作成功。
 
 需要 Python 3.10+；运行脚本前检查当前 Python 环境，缺依赖时按 `scripts/requirements.txt` 安装。纯文本分析无需运行 CLI；画像生成需要宿主提供的图像工具，本技能不自带模型服务，也不需要 API key 才能运行本地 CLI。
 
-下例脚本路径相对于技能根目录；安装后使用该技能实际目录的绝对脚本路径，在用户工作目录执行。输入、输出及默认缓存相对于当前工作目录，不要将案件材料或生成报告写入技能安装目录。`--sources` 给出具体文件；不要假设 shell 自动展开通配符。
+下例脚本路径相对于技能根目录；列名仅作示例，须换成实际探查到的字段。安装后使用该技能实际目录的绝对脚本路径，在用户工作目录执行。输入、输出及默认缓存相对于当前工作目录，不要将案件材料或生成报告写入技能安装目录。`--sources` 给出具体文件；不要假设 shell 自动展开通配符。
 
 ```bash
 # 依赖：python -m pip install -r scripts/requirements.txt
 # 大型XLSX：将整份结果的稳定键合成列表，一次筛选；只返回实际核验的字段
-python scripts/xlsx_query.py --file source.xlsx --where-json keys.json --columns 结算ID 数据唯一记录号 数量 单价 --out matched.json
+python scripts/xlsx_query.py --file source.xlsx --where-json keys.json --columns record_key quantity unit_price --out matched.json
 # 小表：检索候选，后续仍需连接和重算
 python scripts/detective.py trace --result result.xlsx --row 2 --sources source.xlsx rules.md --out report.json --html wall.html
 python scripts/detective.py investigate --mode entity --target "目标名或ID" --sources records.csv note.md --out report.json --html wall.html

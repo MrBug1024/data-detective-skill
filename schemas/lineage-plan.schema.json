@@ -1,66 +1,570 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ExplicitLineageReconciliationPlan",
-  "type": "object", "additionalProperties": false,
-  "required": ["version", "result", "sources", "select", "outputs"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "result",
+    "sources",
+    "select",
+    "outputs"
+  ],
   "properties": {
-    "version": {"const": 1},
-    "description": {"type": "string"},
+    "version": {
+      "const": 1
+    },
+    "description": {
+      "type": "string"
+    },
     "result": {
-      "type": "object", "additionalProperties": false, "required": ["file", "row"],
-      "properties": {"file": {"type": "string"}, "row": {"type": "integer", "minimum": 1},
-        "sheet": {"type": "string"}, "table": {"type": "string"}}
-    },
-    "sources": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/definitions/source"}},
-    "select": {
-      "type": "object", "additionalProperties": false, "required": ["source"],
-      "properties": {"source": {"type": "string"}, "where": {"type": "array", "items": {
-        "type": "object", "additionalProperties": false, "required": ["field"],
-        "oneOf": [{"required": ["result_field"]}, {"required": ["literal"]}],
-        "properties": {"field": {"type": "string"}, "result_field": {"type": "string"},
-          "literal": {"type": ["string", "number", "boolean", "null"]}}
-      }}}
-    },
-    "joins": {"type": "array", "items": {
-      "type": "object", "additionalProperties": false,
-      "required": ["source", "left", "right_field", "cardinality"],
-      "properties": {"source": {"type": "string"}, "left": {"$ref": "#/definitions/field"},
-        "right_field": {"type": "string"},
-        "cardinality": {"enum": ["one_to_one", "many_to_one", "one_to_many", "many_to_many"]}}
-    }},
-    "outputs": {"type": "array", "minItems": 1, "items": {
-      "type": "object", "additionalProperties": false, "required": ["result_field"],
-      "properties": {"result_field": {"type": "string"}, "aggregate": {"enum": ["scalar", "sum", "count", "min", "max"]},
-        "expression": {"$ref": "#/definitions/expression"}, "type": {"enum": ["number", "text"]},
-        "tolerance": {"type": "string"}, "quantize": {"type": "string"},
-        "rounding": {"enum": ["ROUND_HALF_UP", "ROUND_HALF_EVEN", "ROUND_DOWN"]}},
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "row"
+      ],
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sheet": {
+          "type": "string"
+        },
+        "table": {
+          "type": "string"
+        },
+        "header_row": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Physical XLSX header row; enables streamed original-file extraction."
+        },
+        "query": {
+          "$ref": "#/definitions/xlsx_query"
+        }
+      },
       "allOf": [
-        {"if": {"properties": {"aggregate": {"const": "count"}}, "required": ["aggregate"]},
-         "then": {}, "else": {"required": ["expression"]}},
-        {"if": {"required": ["quantize"]}, "then": {"required": ["rounding"]}}
+        {
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "header_row"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "file": {
+                "pattern": "\\.[xX][lL][sS][xX]$"
+              }
+            },
+            "not": {
+              "required": [
+                "table"
+              ]
+            }
+          }
+        }
       ]
-    }},
-    "rule_evidence": {"type": "array", "items": {
-      "type": "object", "additionalProperties": false, "required": ["file", "quote"],
-      "properties": {"file": {"type": "string"}, "quote": {"type": "string", "minLength": 1},
-        "sheet": {"type": "string"}, "table": {"type": "string"}}
-    }},
-    "max_join_rows": {"type": "integer", "minimum": 1, "maximum": 1000000}
+    },
+    "sources": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/definitions/source"
+      }
+    },
+    "select": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "where": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "field"
+            ],
+            "oneOf": [
+              {
+                "required": [
+                  "result_field"
+                ]
+              },
+              {
+                "required": [
+                  "literal"
+                ]
+              }
+            ],
+            "properties": {
+              "field": {
+                "type": "string"
+              },
+              "result_field": {
+                "type": "string"
+              },
+              "literal": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "joins": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "cardinality"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "left": {
+            "$ref": "#/definitions/field"
+          },
+          "right_field": {
+            "type": "string"
+          },
+          "cardinality": {
+            "enum": [
+              "one_to_one",
+              "many_to_one",
+              "one_to_many",
+              "many_to_many"
+            ]
+          },
+          "keys": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "left",
+                "right_field"
+              ],
+              "properties": {
+                "left": {
+                  "$ref": "#/definitions/field"
+                },
+                "right_field": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              }
+            }
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "left",
+              "right_field"
+            ],
+            "not": {
+              "required": [
+                "keys"
+              ]
+            }
+          },
+          {
+            "required": [
+              "keys"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "left"
+                  ]
+                },
+                {
+                  "required": [
+                    "right_field"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result_field"
+        ],
+        "properties": {
+          "result_field": {
+            "type": "string"
+          },
+          "aggregate": {
+            "enum": [
+              "scalar",
+              "sum",
+              "count",
+              "min",
+              "max"
+            ]
+          },
+          "expression": {
+            "$ref": "#/definitions/expression"
+          },
+          "type": {
+            "enum": [
+              "number",
+              "text"
+            ]
+          },
+          "tolerance": {
+            "type": "string"
+          },
+          "quantize": {
+            "type": "string"
+          },
+          "rounding": {
+            "enum": [
+              "ROUND_HALF_UP",
+              "ROUND_HALF_EVEN",
+              "ROUND_DOWN"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "aggregate": {
+                  "const": "count"
+                }
+              },
+              "required": [
+                "aggregate"
+              ]
+            },
+            "then": {},
+            "else": {
+              "required": [
+                "expression"
+              ]
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "quantize"
+              ]
+            },
+            "then": {
+              "required": [
+                "rounding"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "rule_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "file",
+          "quote"
+        ],
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "quote": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sheet": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          },
+          "header_row": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Physical XLSX header row; enables streamed original-file extraction."
+          },
+          "query": {
+            "$ref": "#/definitions/xlsx_query"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "anyOf": [
+                {
+                  "required": [
+                    "header_row"
+                  ]
+                },
+                {
+                  "required": [
+                    "query"
+                  ]
+                }
+              ]
+            },
+            "then": {
+              "properties": {
+                "file": {
+                  "pattern": "\\.[xX][lL][sS][xX]$"
+                }
+              },
+              "not": {
+                "required": [
+                  "table"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "max_join_rows": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    }
   },
   "definitions": {
-    "source": {"type": "object", "additionalProperties": false, "required": ["file"],
-      "properties": {"file": {"type": "string"}, "sheet": {"type": "string"}, "table": {"type": "string"}}},
-    "field": {"type": "object", "additionalProperties": false, "required": ["source", "field"],
-      "properties": {"source": {"type": "string"}, "field": {"type": "string"}}},
-    "expression": {"oneOf": [
-      {"$ref": "#/definitions/field"},
-      {"type": "object", "additionalProperties": false, "required": ["literal"],
-        "properties": {"literal": {"type": ["string", "number", "boolean", "null"]}}},
-      {"type": "object", "minProperties": 1, "maxProperties": 1, "additionalProperties": false,
-        "properties": {
-          "add": {"$ref": "#/definitions/operands"}, "sub": {"$ref": "#/definitions/operands"},
-          "mul": {"$ref": "#/definitions/operands"}, "div": {"$ref": "#/definitions/operands"}}}
-    ]},
-    "operands": {"type": "array", "minItems": 2, "maxItems": 20, "items": {"$ref": "#/definitions/expression"}}
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file"
+      ],
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "sheet": {
+          "type": "string"
+        },
+        "table": {
+          "type": "string"
+        },
+        "header_row": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Physical XLSX header row; enables streamed original-file extraction."
+        },
+        "query": {
+          "$ref": "#/definitions/xlsx_query"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "header_row"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "file": {
+                "pattern": "\\.[xX][lL][sS][xX]$"
+              }
+            },
+            "not": {
+              "required": [
+                "table"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "field"
+      ],
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        }
+      }
+    },
+    "expression": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/field"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "literal"
+          ],
+          "properties": {
+            "literal": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "add": {
+              "$ref": "#/definitions/operands"
+            },
+            "sub": {
+              "$ref": "#/definitions/operands"
+            },
+            "mul": {
+              "$ref": "#/definitions/operands"
+            },
+            "div": {
+              "$ref": "#/definitions/operands"
+            }
+          }
+        }
+      ]
+    },
+    "operands": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 20,
+      "items": {
+        "$ref": "#/definitions/expression"
+      }
+    },
+    "xlsx_query": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Explicit XLSX extraction scope before plan selection. Fields in where use AND; values use OR. key_rows uses OR of complete exact tuples; every row must have the same field set (also checked at runtime).",
+      "properties": {
+        "where": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        },
+        "key_rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "minProperties": 1,
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_return_cells": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reader": {
+          "enum": [
+            "auto",
+            "fast",
+            "compatible"
+          ]
+        }
+      }
+    }
   }
 }

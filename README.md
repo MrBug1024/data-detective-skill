@@ -84,6 +84,8 @@ $data-detective 根据我提供的现场描述和证词重建时间线，比较�
 
 定向查询一次传入整批稳定键，并通过 `--columns` 限制返回字段。CLI 默认按源文件内容哈希复用 `.dd_cache/xlsx_query/` 中的查询结果；`--no-cache` 可禁用，文件内容变化会失效。读取支持快速路径与兼容回退，保留原行号、单元格和完整扫描统计。
 
+工作流由实际表头、字段角色、复合键、连接基数和计算计划驱动。性能样例用于验证实现，不将其行业、表名、固定表数或业务规则内置为通用逻辑。多组复合键通过 `--keys-json` 保留组合关系；未知布局或表达式必须显式适配并报告覆盖边界。
+
 ```sh
 # DATA：物理行号包含表头；多 sheet 时明确指定工作表
 python scripts/detective.py trace --result result.xlsx --row 2 --sheet Sheet1 --sources source.xlsx rules.md --out report.json --no-html
@@ -99,6 +101,9 @@ python scripts/detective.py validate --report report.json --new-evidence supplem
 
 # 按明确规则重算，计划格式见 references/data-entity-workflows.md
 python scripts/reconcile.py --plan lineage-plan.json --out reconciliation.json
+
+# 同一计划整批核验结果物理行，共享来源读取与查询
+python scripts/reconcile.py --plan lineage-plan.json --rows 2 3 4 --out batch-reconciliation.json
 
 # 编译面部特征规格；此命令不生成图片
 python scripts/detective.py portrait --case observations.json --out portrait.json --prompt-out portrait-prompt.txt
@@ -134,6 +139,8 @@ python scripts/package_skill.py --out dist/data-detective.zip
 打包采用运行资源白名单，并生成 SHA-256 校验文件。CI 在 Windows 与 Linux 执行结构检查、回归测试和打包；测试只运行本地合成数据，不调用模型服务。
 
 另有[合成案件盲测](test/README.md)、[画像专项评测](test/portrait/README.md)与[跨格式行为评测](test/data_entity/README.md)。只有显式 `--live` 的模型盲测会联网并使用配置的模型服务；这些评测不构成真实案件准确率承诺。评分夹具不放进精简包，独立 Agent 测试需另外隔离评分材料。
+
+[跨结构回归](tests/test_schema_variants.py)独立生成电商、制造和物流样例，调用公开接口验证改名/重排、晚表头、多工作表、复合键、1对多、长表到宽表、分组聚合及 CSV→SQL→XLSX 多跳。缺列、缺连接、重复唯一键、缺公式缓存和截断均单独验证；这些用例不依赖性能示例的数据、行业字段或业务公式。验证范围是明确映射、关联关系和规则后的管线，不代表可以无依据推断任意业务逻辑。
 
 ```text
 SKILL.md                技能入口与调用范围

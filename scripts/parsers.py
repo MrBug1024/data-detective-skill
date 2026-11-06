@@ -7,10 +7,32 @@ import os
 import re
 import json
 import hashlib
+import zipfile
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 from ingestion_support import read_text, ocr_sidecar, sql_records
+
+
+# The legacy parser materializes every row and cell before building several
+# indexes. read_only limits openpyxl's objects, not those retained by this code.
+MAX_XLSX_WORKSHEET_XML_BYTES = 128 * 1024 * 1024
+
+
+def _check_xlsx_memory_budget(filepath):
+    """Reject oversized worksheet XML before either workbook is opened."""
+    with zipfile.ZipFile(filepath) as archive:
+        worksheet_bytes = sum(
+            entry.file_size for entry in archive.infolist()
+            if entry.filename.startswith('xl/worksheets/')
+            and entry.filename.endswith('.xml')
+        )
+    if worksheet_bytes > MAX_XLSX_WORKSHEET_XML_BYTES:
+        raise ValueError(
+            f'XLSX工作表XML解压后共{worksheet_bytes}字节，超过全量内存解析预算'
+            f'{MAX_XLSX_WORKSHEET_XML_BYTES}字节；请先用scripts/xlsx_query.py'
+            '按稳定键筛选，保留原文件、工作表和行号后再核验'
+        )
 
 
 @dataclass
@@ -71,6 +93,7 @@ class ExcelParser:
         self.diagnostics = []
         if Path(filepath).suffix.lower() == '.xls':
             return self._parse_xls(filepath)
+        _check_xlsx_memory_budget(filepath)
         import openpyxl
         units = []
         formulas = openpyxl.load_workbook(filepath, read_only=True, data_only=False)
@@ -524,7 +547,7 @@ class FileParser:
         except Exception as e:
             # Parsing failures must not become a successful 'no evidence' report
             # or a cached empty index. Unsupported formats are handled above.
-            raise RuntimeError(f"无法解析来源 {filepath} ({type(e).__name__})；请检查文件和依赖") from e
+            raise RuntimeError(f"无法解析来源 {filepath} ({type(e).__name__}): {e}") from e
 
     def parse_result_row(self, filepath: str, row_num: int, sheet_name: Optional[str] = None) -> Optional[AddressableUnit]:
         """解析结果表的特定行（1-based）"""

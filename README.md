@@ -5,7 +5,7 @@
 
 面向 Agent 的数据溯源、实体核查与刑侦分析 skill。把分散的表格、文档和现场描述整理成**可定位的证据、可比较的解释和可执行的核查计划**。
 
-支持 Codex 等遵循 Agent Skills 格式的宿主；提供 Claude Code 的本地目录安装。技能名为 **`data-detective`**，版本 **3.2.2**，入口为 [SKILL.md](SKILL.md)。Python CLI 负责确定性检索与整理，Agent 继续完成规则核验和分析。
+支持 Codex 等遵循 Agent Skills 格式的宿主；提供 Claude Code 的本地目录安装。技能名为 **`data-detective`**，版本 **3.2.3**，入口为 [SKILL.md](SKILL.md)。Python CLI 负责确定性检索与整理，Agent 继续完成规则核验和分析。
 
 | 模式 | 适用任务 | 输出 |
 |---|---|---|
@@ -80,6 +80,10 @@ $data-detective 根据我提供的现场描述和证词重建时间线，比较�
 
 在源码根目录运行以下命令；安装后在自己的工作目录执行，并将 `scripts/` 替换为技能安装目录下的绝对路径。`--sources` 接收具体文件路径，不能依赖 shell 自动展开通配符。
 
+大型 XLSX 请先按稳定键使用 `scripts/xlsx_query.py` 定向读取，再连接主表、核对字段和重算。`trace` 是内存候选检索工具，不能直接替代整批大表核验。含标题行的工作簿通过 `--header-row` 显式指定真实表头；详见[大表定向溯源](references/data-entity-workflows.md#大型-xlsx-与整份结果溯源)。
+
+定向查询一次传入整批稳定键，并通过 `--columns` 限制返回字段。CLI 默认按源文件内容哈希复用 `.dd_cache/xlsx_query/` 中的查询结果；`--no-cache` 可禁用，文件内容变化会失效。读取支持快速路径与兼容回退，保留原行号、单元格和完整扫描统计。
+
 ```sh
 # DATA：物理行号包含表头；多 sheet 时明确指定工作表
 python scripts/detective.py trace --result result.xlsx --row 2 --sheet Sheet1 --sources source.xlsx rules.md --out report.json --no-html
@@ -147,12 +151,12 @@ tests/、test/            回归测试与评测材料（仅源码）
 先更新 `SKILL.md` 的 `metadata.version` 与本页版本号，运行上述检查并提交。推送与版本一致的标签即可触发 Release：
 
 ```sh
-git tag v3.2.2
+git tag v3.2.3
 git push origin main
-git push origin v3.2.2
+git push origin v3.2.3
 ```
 
-也可以在 GitHub Actions 的 Release 工作流中手动填写已存在标签对应的版本发布。工作流核对版本、在 Python 3.10 和 3.13 上执行验证和测试，然后上传精简 ZIP 与 SHA-256；已存在的 Release 不会被覆盖。固定版本安装时可将 GitHub 链接指定为 `https://github.com/MrBug1024/data-detective-skill/tree/v3.2.2`，仓库内路径仍为 `.`，安装名称仍为 `data-detective`。
+也可以在 GitHub Actions 的 Release 工作流中手动填写已存在标签对应的版本发布。工作流核对版本、在 Python 3.10 和 3.13 上执行验证和测试，然后上传精简 ZIP 与 SHA-256；已存在的 Release 不会被覆盖。固定版本安装时可将 GitHub 链接指定为 `https://github.com/MrBug1024/data-detective-skill/tree/v3.2.3`，仓库内路径仍为 `.`，安装名称仍为 `data-detective`。
 
 ## 许可证
 

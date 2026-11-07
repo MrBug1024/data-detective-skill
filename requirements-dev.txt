@@ -2,3 +2,4 @@
 # Repository validation and synthetic PDF fixtures; not needed by an installed skill.
 PyYAML>=6.0
 reportlab>=4.0
+pytest>=8.0

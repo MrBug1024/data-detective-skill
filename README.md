@@ -61,7 +61,7 @@ python scripts/install_skill.py --dest /path/to/skills
 ```powershell
 python -m pip install -r requirements-dev.txt
 python scripts/package_skill.py --check
-python -m unittest discover -s tests -v
+python -m pytest -q
 python test/lineage/run_eval.py --help
 python scripts/benchmark.py --help
 ```

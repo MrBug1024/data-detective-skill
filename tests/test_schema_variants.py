@@ -367,7 +367,7 @@ class GenericSchemaVariants(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         report = json.loads(output.read_text(encoding='utf-8'))
         self.assertEqual(report['analysis_stage'], 'source_trace')
-        locations = [item for item in report['source_locations'] if Path(item['file']) == source]
+        locations = [item for item in report['source_locations'] if Path(item['file']).resolve() == source.resolve()]
         self.assertTrue(any(item['row'] == 2 for item in locations))
         matches = report['result_rows'][0]['source_matches']
         self.assertEqual(1, len(matches))

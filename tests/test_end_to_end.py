@@ -78,7 +78,7 @@ class TestEndToEnd(unittest.TestCase):
         view = prepare_trace_wall(report)['views'][0]
         source = next(n for n in view['chain']['nodes'] if n['node_type'] == 'source')
         self.assertEqual(source['row_num'], 500)
-        self.assertEqual(source['source_file'], str(self.folder / 'A.xlsx'))
+        self.assertEqual(Path(source['source_file']).resolve(), (self.folder / 'A.xlsx').resolve())
 
     def test_missing_requested_source_is_partial_and_actionable(self):
         report = self.trace(['A.xlsx', 'missing.xlsx'])

@@ -48,7 +48,7 @@ class DataWallEvidenceTests(unittest.TestCase):
         self.assertEqual([c['evidence'] for c in data['cards']], report['rows'])
         for card in data['cards']:
             source = data['source_catalog'][card['sources'][0]['source_ref']]
-            self.assertEqual(source['file'], str(path))
+            self.assertEqual(Path(source['file']).resolve(), path.resolve())
             self.assertEqual(source['sha256'], report['source_sha256'])
             self.assertEqual(card['evidence']['cells']['visit_id']['address'], 'A' + str(card['row']))
             self.assertEqual(card['outcome'], 'extraction_complete')
@@ -83,11 +83,11 @@ class DataWallEvidenceTests(unittest.TestCase):
         nodes = [node for node in view['chain']['nodes'] if node['node_type'] == 'source']
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0]['row_num'], 2)
-        self.assertEqual(nodes[0]['source_file'], str(source))
+        self.assertEqual(Path(nodes[0]['source_file']).resolve(), source.resolve())
         self.assertEqual(nodes[0]['field_values'], ['ORD-0001', '10.25'])
         self.assertEqual(len(view['chain']['edges']), 1)
         self.assertEqual(view['evidence'][0]['source_location']['row'], 2)
-        self.assertEqual(view['source_locations'][0]['file'], str(source))
+        self.assertEqual(Path(view['source_locations'][0]['file']).resolve(), source.resolve())
         self.assertEqual({m['result_field'] for m in view['field_mappings']}, {'order_id', 'amount'})
 
     def test_target_wall_keeps_entity_spans_and_source_text_without_a_result_table(self):
@@ -101,7 +101,7 @@ class DataWallEvidenceTests(unittest.TestCase):
         self.assertEqual(data['assessment']['outcome'], 'evidence_located')
         self.assertTrue(data['views'])
         self.assertEqual({m['raw_value'] for m in data['entity_mentions']}, {'O-001', 'C-001'})
-        self.assertEqual(data['rule_evidence'][0]['source_location']['file'], str(source))
+        self.assertEqual(Path(data['rule_evidence'][0]['source_location']['file']).resolve(), source.resolve())
         self.assertIn('Order ID O-001', data['rule_evidence'][0]['value'])
         self.assertEqual(data['lookup_seeds'][0]['value'], 'C-001')
 

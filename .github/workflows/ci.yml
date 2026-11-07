@@ -69,7 +69,7 @@ jobs:
                    "--dest", str(skills)], check=True,
               )
               installed = skills / "data-detective"
-              for script in ("detective.py", "reconcile.py", "validate_analysis.py"):
+              for script in ("data_run.py", "reconcile.py", "read_evidence.py"):
                   subprocess.run(
                       [sys.executable, str(installed / "scripts" / script), "--help"],
                       check=True, cwd=temporary,

@@ -201,40 +201,6 @@ class TestExtractionPrecision(unittest.TestCase):
             self.assertEqual(parser.parse_result_row(str(path), 2, sheet_name='Current').get_field('id'), 'C0002')
 
 
-class TestCriminalCLI(unittest.TestCase):
-    def test_alias_and_validation_preserve_original_evidence_and_configuration(self):
-        cli = str(Path(__file__).resolve().parents[1] / 'scripts' / 'detective.py')
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source, new = root / 'case.txt', root / 'additional.txt'
-            source.write_text('2024-07-20 张伟华支付2万元，记录来源待核实。', encoding='utf-8')
-            new.write_text('现场勘验记录：门口发现鞋印。', encoding='utf-8')
-            config = root / 'config.json'
-            config.write_text(json.dumps({'criminal_max_units': 2}), encoding='utf-8')
-            for mode in ('criminal', 'event'):
-                report = root / f'{mode}.json'
-                process = subprocess.run([sys.executable, cli, 'investigate', '--mode', mode,
-                                          '--target', '现场调查', '--sources', str(source),
-                                          '--config', str(config), '--cache-dir', str(root / 'cache'),
-                                          '--out', str(report), '--no-html'],
-                                         capture_output=True, text=True, encoding='utf-8')
-                self.assertEqual(process.returncode, 0, process.stderr)
-                data = json.loads(report.read_text(encoding='utf-8'))
-                self.assertEqual(data['investigation_type'], 'criminal')
-                self.assertIsNone(data['confidence'])
-                self.assertEqual(data['analysis_stage'], 'evidence_packet_only')
-                self.assertEqual(data['chain']['edges'], [])
-                self.assertIn('未评估', process.stdout)
-            updated = root / 'validated.json'
-            process = subprocess.run([sys.executable, cli, 'validate', '--report', str(root / 'criminal.json'),
-                                      '--new-evidence', str(new), '--out', str(updated),
-                                      '--cache-dir', str(root / 'cache'), '--no-html'],
-                                     capture_output=True, text=True, encoding='utf-8')
-            self.assertEqual(process.returncode, 0, process.stderr)
-            data = json.loads(updated.read_text(encoding='utf-8'))
-            self.assertEqual(set(data['_source_files']), {str(source), str(new)})
-            self.assertEqual(data['_config']['criminal_max_units'], 2)
-            self.assertEqual(data['coverage']['total_units'], 2)
 
 
 if __name__ == '__main__':

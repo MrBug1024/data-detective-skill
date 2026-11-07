@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from investigator import Investigator, Investigation
-from forensic_math import likelihood_ratio, combine_likelihoods
 from read_evidence import evidence_slice
 from parsers import FileParser, CSVParser
 
@@ -68,31 +67,7 @@ class InvestigationInvariants(unittest.TestCase):
         report = self.run_quiet(self.inv.investigate_entity, "张三", [path])
         self.assertEqual(len(report["evidence"]), 1)
 
-    def test_criminal_packet_copy_groups_and_no_causal_claims(self):
-        p1 = self.file("original.txt", "2025-01-01 监控记载某人经过；尚未校时。")
-        p2 = self.file("copy.txt", "2025-01-01 监控记载某人经过；尚未校时。")
-        report = self.run_quiet(self.inv.investigate_criminal, "监控", [p1, p2])
-        self.assertEqual(report["analysis_stage"], "evidence_packet_only")
-        self.assertIsNone(report["confidence"])
-        self.assertEqual(report["chain"]["edges"], [])
-        self.assertEqual(report["conclusions"], [])
-        self.assertEqual(len(report["provenance"]["exact_copy_groups"]), 1)
-        self.assertEqual(len(report["timeline"]), 2)
-        for ev in report["evidence"]:
-            self.assertEqual(len(ev["file_sha256"]), 64)
-            self.assertEqual(ev["verification"], "unverified")
-            self.assertEqual(ev["independence"], "unknown")
 
-    def test_omissions_reported_and_ids_refer_to_actual_nodes(self):
-        self.inv.config.update(criminal_max_units=1, criminal_max_chars=100)
-        path = self.file("scene.txt", "很长的现场描述" * 40 + "\n\n另一份记录")
-        report = self.run_quiet(self.inv.investigate_event, "现场", [path])
-        self.assertEqual(report["investigation_type"], "criminal")
-        self.assertEqual(report["coverage"]["included_units"], 1)
-        self.assertEqual(report["coverage"]["omitted_units"], 1)
-        self.assertTrue(report["coverage"]["truncated_evidence_ids"])
-        nodes = {n["node_id"] for n in report["chain"]["nodes"]}
-        self.assertTrue(all(e["node_id"] in nodes for e in report["evidence"]))
 
     def test_same_timestamp_different_source_events_preserved(self):
         items = [{"time": "2025-01-01", "event": "进入", "source": "a"},
@@ -101,7 +76,7 @@ class InvestigationInvariants(unittest.TestCase):
         self.assertEqual(len(Investigator._timeline(items)), 3)
 
     def test_missing_source_does_not_disappear(self):
-        report = self.run_quiet(self.inv.investigate_criminal, "现场", [str(self.folder / "missing.txt")])
+        report = self.run_quiet(self.inv.investigate_entity, "ORDER-123", [str(self.folder / "missing.txt")])
         self.assertTrue(any(m["type"] == "missing_source" for m in report["missing"]))
 
     def test_parse_failure_cannot_become_empty_negative_result(self):
@@ -132,39 +107,6 @@ class InvestigationInvariants(unittest.TestCase):
         self.assertEqual(saved["_source_files"], ["a.csv"])
 
 
-class ForensicMathInvariants(unittest.TestCase):
-    def item(self, eid="e1", group="g1", p1=.6, p2=.2):
-        return dict(evidence_id=eid, dependency_group=group, model_source="synthetic arithmetic example",
-                    p_e_h1=p1, p_e_h2=p2)
-
-    def test_lr_is_not_posterior(self):
-        self.assertAlmostEqual(likelihood_ratio(.6, .2), 3)
-        no_prior = combine_likelihoods([self.item()], conditional_independence_justification="single evidence")
-        self.assertIsNone(no_prior["posterior_h1"])
-        with_prior = combine_likelihoods([self.item()], conditional_independence_justification="single evidence", prior_h1=.1)
-        self.assertAlmostEqual(with_prior["posterior_h1"], .25)
-
-    def test_correlated_or_unknown_models_rejected(self):
-        for items in ([self.item(), self.item("e2")], [{**self.item(), "model_source": ""}]):
-            with self.assertRaises(ValueError):
-                combine_likelihoods(items, conditional_independence_justification="test")
-
-    def test_invalid_probability_and_prior_rejected(self):
-        for value in (0, -1, float("nan"), float("inf"), True, 2):
-            with self.assertRaises(ValueError):
-                likelihood_ratio(value, .2)
-        for prior in (0, 1, float("nan"), True):
-            with self.assertRaises(ValueError):
-                combine_likelihoods([self.item()], conditional_independence_justification="single", prior_h1=prior)
-
-    def test_extreme_products_do_not_overflow(self):
-        items = [self.item(f"e{i}", f"g{i}", .9, 1e-200) for i in range(20)]
-        result = combine_likelihoods(items, conditional_independence_justification="synthetic independent draws", prior_h1=.1)
-        self.assertEqual(result["posterior_h1"], 1)
-        with self.assertRaises(ValueError):
-            likelihood_ratio(.9, 1e-320)
-        tiny = combine_likelihoods([self.item(p2=1e-320)], conditional_independence_justification="single")
-        self.assertGreater(tiny["log_lr"], 700)
 
 
 class EvidencePaging(unittest.TestCase):

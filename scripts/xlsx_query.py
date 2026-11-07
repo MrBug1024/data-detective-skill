@@ -7,12 +7,16 @@ values retain their XML decimal text. Date cells additionally expose iso_value.
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
+from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 import os
 from pathlib import Path
 import posixpath
 import re
+import sqlite3
+import subprocess
 import sys
 import time
 import tempfile
@@ -29,7 +33,11 @@ MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 M = "{" + MAIN + "}"
 REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 ADDRESS = re.compile(r"([A-Z]+)([1-9][0-9]*)\Z")
+# Storage changes do not alter decoded evidence or filtering semantics, so
+# previously validated content caches remain reusable without another scan.
 READER_VERSION = "xlsx-query-v7-bounded-typed-tuples-formula-content-cache"
+DEFAULT_SHARED_STRING_MEMORY = 16 * 1024 * 1024
+PARALLEL_XML_THRESHOLD_BYTES = 64 * 1024 * 1024
 
 
 class _UnsupportedFrames(ValueError):
@@ -38,6 +46,77 @@ class _UnsupportedFrames(ValueError):
 
 class _ReturnCellBudgetError(ValueError):
     """A complete query cannot retain its requested output within the budget."""
+
+
+class _ParallelXMLValidation:
+    """One bounded local worker overlaps full validation with row filtering.
+
+    The worker reads the same archive member independently. Success is gated
+    on its exit status; errors/fallback terminate it before leaving the scope.
+    This costs one extra decompression pass but no whole-sheet allocation.
+    """
+    def __init__(self, file, member, xml_bytes, enabled):
+        self.process = None
+        self.xml_bytes = xml_bytes
+        self.mode = 'in_process'
+        self.fallback = None
+        if enabled and xml_bytes >= PARALLEL_XML_THRESHOLD_BYTES:
+            try:
+                self.process = subprocess.Popen(
+                    [sys.executable, str(Path(__file__).resolve()), '--validate-worksheet-worker', str(file), member],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                self.mode = 'parallel_process'
+            except OSError as exc:
+                self.fallback = type(exc).__name__
+
+    @property
+    def parallel(self):
+        return self.process is not None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        if self.process is None:
+            return False
+        process = self.process
+        try:
+            if exc_type is not None:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=10)
+                return False
+            timeout = max(60, min(1800, self.xml_bytes / (1024 * 1024)))
+            try:
+                _, errors = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=10)
+                raise ValueError('Complete worksheet XML validation timed out; no evidence was returned or cached') from None
+            if process.returncode != 0:
+                message = errors.decode('utf-8', errors='replace')[:1000].strip()
+                raise ValueError('Complete worksheet XML validation failed: ' + message)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+            if process.stderr is not None:
+                process.stderr.close()
+        return False
+
+
+def _validate_worksheet_worker(file, member):
+    try:
+        with ZipFile(file) as archive, archive.open(member) as stream:
+            validator = _xml_validator()
+            for block in iter(lambda: stream.read(1024 * 1024), b''):
+                validator.Parse(block, False)
+            validator.Parse(b'', True)
+    except Exception as exc:
+        print(f'{type(exc).__name__}: {exc}', file=sys.stderr)
+        return 2
+    return 0
 
 
 def _check_return_cell_budget(row_count, column_count, maximum):
@@ -103,7 +182,7 @@ def _raw_attributes(serialization):
             for match in _ATTRIBUTE_PARTS.finditer(serialization)}
 
 
-def _framed_rows(stream):
+def _framed_rows(stream, *, validate=True):
     """Frame canonical rows while Expat validates every decompressed byte.
 
     This is a lexical optimization for a restricted XML serialization, not an
@@ -111,7 +190,7 @@ def _framed_rows(stream):
     non-UTF-8 serializations select the compatible XML reader instead. No
     partial or unvalidated scan can become a successful result or cache entry.
     """
-    validator = _xml_validator()
+    validator = _xml_validator() if validate else None
     buffer = b""
     tail = b""
     root_open = None
@@ -119,10 +198,11 @@ def _framed_rows(stream):
     closed_sheet_data = False
     while True:
         chunk = stream.read(1024 * 1024)
-        try:
-            validator.Parse(chunk, not chunk)
-        except expat.ExpatError as exc:
-            raise ValueError(f"Invalid worksheet XML: {exc}") from exc
+        if validator is not None:
+            try:
+                validator.Parse(chunk, not chunk)
+            except expat.ExpatError as exc:
+                raise ValueError(f"Invalid worksheet XML: {exc}") from exc
         detection = tail + chunk
         if not closed_sheet_data:
             # Extensions after sheetData do not participate in row framing.
@@ -222,8 +302,7 @@ def _parse_frame(raw, root_open):
 def _prefilter_spec(column, allowed, strings, style_ids, custom_formats, epoch_1904):
     target = column.encode('ascii') + rb'[1-9][0-9]*'
     selector = re.compile(rb'<c(?:\s+' + _ATTRIBUTE + rb')*?\s+r\s*=\s*(?:"' + target + rb'"|\'' + target + rb'\')(?:\s+' + _ATTRIBUTE + rb')*\s*(?:/>|>.*?</c\s*>)', re.DOTALL)
-    allowed_indices = {str(index).encode('ascii') for index, value in enumerate(strings)
-                       if _exact(value) in allowed}
+    allowed_indices = strings.matching_indices(allowed)
     return {"selector": selector, "allowed_indices": allowed_indices,
             "string_count": len(strings), "column": column, "allowed": allowed,
             "strings": strings, "style_ids": style_ids,
@@ -382,14 +461,122 @@ def _styles(archive):
             if xfs is not None else [0]), formats
 
 
-def _shared_strings(archive):
-    if "xl/sharedStrings.xml" not in archive.namelist():
-        return []
-    strings = []
-    with archive.open("xl/sharedStrings.xml") as stream:
-        for element in _elements(stream, M + "si"):
-            strings.append(_text(element))
-    return strings
+class _SharedStringTable:
+    """Keep small string tables fast, spill large ones to a disposable database.
+
+    The budget covers retained Python string values and estimated entry overhead,
+    not total process RSS (XML frames, SQLite pages and requested evidence have
+    separate costs). The database is never a persistent evidence cache.
+    """
+    def __init__(self, memory_budget, match_values=None):
+        self.memory_budget = memory_budget
+        self.match_values = match_values
+        self.matches = set()
+        self.items = []
+        self.count = 0
+        self.retained_bytes = 0
+        self.peak_retained_bytes = 0
+        self.database = None
+        self.temporary = None
+        self.hot = OrderedDict()
+        self.hot_budget = min(memory_budget, 1024 * 1024)
+        self.backend = 'memory'
+
+    @staticmethod
+    def _size(value):
+        return sys.getsizeof(value) + 80  # Conservative per-entry container cost.
+
+    def _spill(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='dd-xlsx-strings-')
+        self.database = sqlite3.connect(str(Path(self.temporary.name) / 'strings.sqlite'))
+        self.database.execute('PRAGMA journal_mode=OFF')
+        self.database.execute('PRAGMA synchronous=OFF')
+        self.database.execute('PRAGMA cache_size=-2048')
+        self.database.execute('CREATE TABLE strings (id INTEGER PRIMARY KEY, value TEXT NOT NULL)')
+        self.database.executemany('INSERT INTO strings VALUES (?, ?)', enumerate(self.items))
+        self.items.clear()
+        self.retained_bytes = 0
+        self.backend = 'sqlite'
+
+    def append(self, value):
+        size = self._size(value)
+        if self.database is None and self.retained_bytes + size > self.memory_budget:
+            self._spill()
+        if self.database is None:
+            self.items.append(value)
+            self.retained_bytes += size
+            self.peak_retained_bytes = max(self.peak_retained_bytes, self.retained_bytes)
+        else:
+            self.database.execute('INSERT INTO strings VALUES (?, ?)', (self.count, value))
+        if self.match_values is not None and _exact(value) in self.match_values:
+            self.matches.add(str(self.count).encode('ascii'))
+        self.count += 1
+
+    def finish(self):
+        if self.database is not None:
+            self.database.commit()
+
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, index):
+        if not isinstance(index, int) or not 0 <= index < self.count:
+            raise IndexError(index)
+        if self.database is None:
+            return self.items[index]
+        if index in self.hot:
+            value = self.hot.pop(index)
+            self.hot[index] = value
+            return value
+        value = self.database.execute('SELECT value FROM strings WHERE id=?', (index,)).fetchone()[0]
+        size = self._size(value)
+        if size <= self.hot_budget:
+            while self.hot and self.retained_bytes + size > self.hot_budget:
+                _, old = self.hot.popitem(last=False)
+                self.retained_bytes -= self._size(old)
+            self.hot[index] = value
+            self.retained_bytes += size
+            self.peak_retained_bytes = max(self.peak_retained_bytes, self.retained_bytes)
+        return value
+
+    def matching_indices(self, allowed):
+        # Usually computed while parsing the SST; avoid decoding/scanning the
+        # entire table a second time just to build the exact-key prefilter.
+        if self.match_values == allowed:
+            return self.matches
+        values = (enumerate(self.items) if self.database is None else
+                  self.database.execute('SELECT id, value FROM strings'))
+        return {str(index).encode('ascii') for index, value in values if _exact(value) in allowed}
+
+    def metrics(self):
+        return {'backend': self.backend, 'count': self.count,
+                'memory_budget_bytes': self.memory_budget,
+                'peak_retained_value_bytes_estimate': self.peak_retained_bytes,
+                'temporary_storage': self.backend == 'sqlite'}
+
+    def close(self):
+        try:
+            if self.database is not None:
+                self.database.close()
+        finally:
+            self.items.clear()
+            self.hot.clear()
+            if self.temporary is not None:
+                self.temporary.cleanup()
+
+
+@contextmanager
+def _shared_strings(archive, memory_budget=DEFAULT_SHARED_STRING_MEMORY, match_values=None):
+    strings = _SharedStringTable(memory_budget, match_values)
+    try:
+        if "xl/sharedStrings.xml" in archive.namelist():
+            with archive.open("xl/sharedStrings.xml") as stream:
+                for element in _elements(stream, M + "si"):
+                    strings.append(_text(element))
+        strings.finish()
+        yield strings
+    finally:
+        strings.close()
 
 
 def _cell(element, strings, style_ids, custom_formats, epoch_1904):
@@ -473,7 +660,72 @@ def _column(address):
     return address.rstrip("0123456789")
 
 
-def inspect_xlsx(file, header_rows=5):
+class _SampleStringsComplete(Exception):
+    pass
+
+
+def _sample_shared_strings(archive, needed):
+    """Resolve sampled indexes without constructing all preceding SI trees.
+
+    Only the required prefix is parsed, as for worksheet inspection. Full
+    queries retain their separate whole-XML validation requirement.
+    """
+    strings, stack, pieces = {}, [], []
+    index = -1
+    selected = False
+    text_depth = None
+    scanned = 0
+    parser = _xml_validator()
+
+    def start(name, attributes):
+        nonlocal index, selected, text_depth
+        stack.append(name)
+        if name == MAIN + '|si' and len(stack) == 2:
+            index += 1
+            selected = index in needed
+        if selected and name == MAIN + '|t' and (
+                len(stack) == 3 or (len(stack) == 4 and stack[-2] == MAIN + '|r')):
+            text_depth = len(stack)
+
+    def content(text):
+        if text_depth is not None:
+            pieces.append(text)
+
+    def end(name):
+        nonlocal selected, text_depth, scanned
+        if text_depth == len(stack):
+            text_depth = None
+        if name == MAIN + '|si' and len(stack) == 2:
+            scanned += 1
+            if selected:
+                strings[index] = ''.join(pieces).replace('_x005F_', '_')
+                pieces.clear()
+                if len(strings) == len(needed):
+                    raise _SampleStringsComplete()
+            selected = False
+        stack.pop()
+
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = content
+    if needed:
+        if 'xl/sharedStrings.xml' not in archive.namelist():
+            raise ValueError('Sample references a missing sharedStrings.xml')
+        with archive.open('xl/sharedStrings.xml') as stream:
+            try:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    parser.Parse(chunk, False)
+                parser.Parse(b'', True)
+            except _SampleStringsComplete:
+                pass
+            except expat.ExpatError as exc:
+                raise ValueError(f'Invalid sampled shared strings XML: {exc}') from exc
+        if len(strings) != len(needed):
+            raise ValueError('Sample references an unavailable shared string')
+    return strings, scanned
+
+
+def inspect_xlsx(file, header_rows=5, sheet=None):
     """Read dimensions and only the first physical rows, without a full scan.
 
     Sample values stay in the returned result; the CLI prints only a file path
@@ -489,12 +741,16 @@ def inspect_xlsx(file, header_rows=5):
     needed = set()
     with ZipFile(file) as archive:
         sheets, epoch_1904 = _relationships(archive)
+        if sheet is not None:
+            sheets = [entry for entry in sheets if entry[0] == sheet]
+            if not sheets:
+                raise ValueError(f'Worksheet not found: {sheet}')
         style_ids, custom_formats = _styles(archive)
         for name, sheet_path in sheets:
             dimension = None
             rows = []
             with archive.open(sheet_path) as stream:
-                for _, element in ET.iterparse(stream, events=("end",)):
+                for _, element in ET.iterparse(_ValidatedXMLStream(stream), events=("end",)):
                     if element.tag == M + "dimension":
                         dimension = element.attrib.get("ref")
                     elif element.tag == M + "row":
@@ -517,18 +773,7 @@ def inspect_xlsx(file, header_rows=5):
                         if number == header_rows:
                             break
             samples.append({"sheet": name, "dimension": dimension, "elements": rows})
-        strings = {}
-        if needed:
-            if "xl/sharedStrings.xml" not in archive.namelist():
-                raise ValueError("Sample references a missing sharedStrings.xml")
-            with archive.open("xl/sharedStrings.xml") as stream:
-                for index, element in enumerate(_elements(stream, M + "si")):
-                    if index in needed:
-                        strings[index] = _text(element)
-                        if len(strings) == len(needed):
-                            break
-            if len(strings) != len(needed):
-                raise ValueError("Sample references an unavailable shared string")
+        strings, string_entries_scanned = _sample_shared_strings(archive, needed)
         result_sheets = []
         for sample in samples:
             rows = []
@@ -547,7 +792,9 @@ def inspect_xlsx(file, header_rows=5):
     return {"file": str(file), "operation": "inspect", "header_rows": header_rows,
             "sheets": result_sheets, "scan_complete": False,
             "coverage": {"scope": "first_physical_rows_only", "max_physical_row": header_rows,
-                         "shared_strings_retained": len(strings)},
+                         "shared_strings_retained": len(strings),
+                         "shared_string_entries_scanned": string_entries_scanned,
+                         "shared_string_validation_scope": "required_prefix_only"},
             "elapsed_seconds": round(time.perf_counter() - started, 3)}
 
 
@@ -614,7 +861,7 @@ def _canonical_key_rows(key_rows):
 
 def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1,
                      limit=None, progress=None, reader="compatible", key_rows=None,
-                     max_return_cells=500000):
+                     max_return_cells=500000, shared_string_memory_bytes=DEFAULT_SHARED_STRING_MEMORY):
     """Return exact matches after scanning the selected sheet completely.
 
     ``where`` maps column labels to allowed exact values; fields use AND and
@@ -679,7 +926,7 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
         if len(issues) < 100:
             issues.append({"code": code, "row_num": row_num, "address": address})
 
-    with ZipFile(file) as archive:
+    with ZipFile(file) as archive, ExitStack() as resources:
         sheets, epoch_1904 = _relationships(archive)
         if sheet is None:
             if len(sheets) != 1:
@@ -690,11 +937,15 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
             if not selected:
                 raise ValueError(f"Worksheet not found: {sheet}")
             _, sheet_path = selected[0]
-        strings = _shared_strings(archive)
+        validation = resources.enter_context(_ParallelXMLValidation(
+            file, sheet_path, archive.getinfo(sheet_path).file_size, reader == 'fast'))
+        match_values = (next(iter(allowed.values())) if allowed else
+                        tuple_unions[tuple_fields[0]] if tuple_fields else None) if reader == 'fast' else None
+        strings = resources.enter_context(_shared_strings(archive, shared_string_memory_bytes, match_values))
         style_ids, custom_formats = _styles(archive)
         with archive.open(sheet_path) as stream:
             last_row = 0
-            row_iterator = _framed_rows(stream) if reader == "fast" else _elements(stream, M + "row")
+            row_iterator = _framed_rows(stream, validate=not validation.parallel) if reader == "fast" else _elements(stream, M + "row")
             prefilter = None
             for item in row_iterator:
                 if reader == "fast":
@@ -811,6 +1062,7 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
                                  "cells": result_cells})
         if header is None:
             raise ValueError(f"Header physical row {header_row} was not found")
+        string_metrics = strings.metrics()
     after = file.stat()
     if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
         raise ValueError("Source file changed while scanning; repeat against a stable snapshot")
@@ -837,6 +1089,9 @@ def _query_xlsx_core(file, *, sheet=None, where=None, columns=None, header_row=1
                          "xml_well_formedness": "complete_worksheet",
                          "issue_counts": issue_counts, "issue_details_truncated": sum(issue_counts.values()) > len(issues)},
             "issues": issues, "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "shared_strings": string_metrics,
+            "xml_validation": {"mode": validation.mode, "complete": True,
+                               "worker_start_fallback": validation.fallback},
             "reader": "validated_row_frames" if reader == "fast" else "compatible_xml",
             "date_epoch": "1904" if epoch_1904 else "1900"}
     if key_rows is not None:
@@ -858,7 +1113,8 @@ def _source_digest(file):
 
 def query_xlsx(file, *, sheet=None, where=None, columns=None, header_row=1,
                limit=None, progress=None, reader="auto", cache_dir=None, key_rows=None,
-               max_return_cells=500000):
+               max_return_cells=500000, shared_string_memory_bytes=DEFAULT_SHARED_STRING_MEMORY,
+               snapshot_dir=None):
     """Scan one worksheet once for an entire list of exact keys.
 
     ``where={field: [key1, key2, ...]}`` batches all keys into one scan. Fields
@@ -868,6 +1124,11 @@ def query_xlsx(file, *, sheet=None, where=None, columns=None, header_row=1,
     automatically retries supported XML with the compatible reader when needed.
     ``max_return_cells`` bounds retained rows times projected columns; exceeding
     it fails explicitly, without returning or caching a partial result.
+    ``shared_string_memory_bytes`` bounds retained shared-string values before
+    temporary SQLite spill. This is not a bound on total process memory.
+    ``snapshot_dir`` explicitly selects a previously prepared complete source
+    snapshot for cross-query key/projection reuse. Missing or stale snapshots
+    fail; they do not silently trigger another full worksheet scan.
     """
     started = time.perf_counter()
     file = Path(file).expanduser().resolve()
@@ -888,8 +1149,16 @@ def query_xlsx(file, *, sheet=None, where=None, columns=None, header_row=1,
         raise ValueError("Invalid header_row or limit")
     if type(max_return_cells) is not int or max_return_cells < 1:
         raise ValueError("max_return_cells must be a positive integer")
+    if type(shared_string_memory_bytes) is not int or shared_string_memory_bytes < 1:
+        raise ValueError("shared_string_memory_bytes must be a positive integer")
     columns = list(columns) if columns is not None else None
     key_rows = _canonical_key_rows(key_rows)
+    if snapshot_dir is not None:
+        from xlsx_snapshot import query_snapshot
+        return query_snapshot(file, index_dir=snapshot_dir, sheet=sheet, where=where,
+                              columns=columns, header_row=header_row, limit=limit,
+                              progress=progress, key_rows=key_rows,
+                              max_return_cells=max_return_cells)
     digest = _source_digest(file)
     # OR values have set semantics. Reordering/deduplicating a result table's
     # keys must not turn the same source query into another full XML scan.
@@ -920,6 +1189,8 @@ def query_xlsx(file, *, sheet=None, where=None, columns=None, header_row=1,
                         result['cache'] = {"enabled": True, "hit": True, "key": key,
                                            "path": str(cache_file), "reader_version": READER_VERSION}
                         result['where'] = where or {}
+                        result.setdefault('shared_strings', {'backend': 'not_recorded', 'count': None})
+                        result['shared_strings']['metrics_scope'] = 'original_scan; not loaded on cache hit'
                         return result
             except _ReturnCellBudgetError:
                 raise
@@ -931,18 +1202,21 @@ def query_xlsx(file, *, sheet=None, where=None, columns=None, header_row=1,
         result = _query_xlsx_core(file, sheet=sheet, where=where, columns=columns,
                                   header_row=header_row, limit=limit, progress=progress,
                                   reader=selected_reader, key_rows=key_rows,
-                                  max_return_cells=max_return_cells)
+                                  max_return_cells=max_return_cells,
+                                  shared_string_memory_bytes=shared_string_memory_bytes)
     except _UnsupportedFrames as exc:
         fallback_reason = str(exc)
         result = _query_xlsx_core(file, sheet=sheet, where=where, columns=columns,
                                   header_row=header_row, limit=limit, progress=progress,
                                   reader="compatible", key_rows=key_rows,
-                                  max_return_cells=max_return_cells)
+                                  max_return_cells=max_return_cells,
+                                  shared_string_memory_bytes=shared_string_memory_bytes)
     if result['source_sha256'] != digest:
         raise ValueError("Source file changed during query; no result was cached")
     if fallback_reason is not None:
         result['reader_fallback_reason'] = fallback_reason
     result['cold_scan_elapsed_seconds'] = result['elapsed_seconds']
+    result['shared_strings']['metrics_scope'] = 'current_scan'
     result['elapsed_seconds'] = round(time.perf_counter() - started, 3)
     result['cache'] = {"enabled": cache_file is not None, "hit": False, "key": key,
                        "path": str(cache_file) if cache_file is not None else None,
@@ -979,6 +1253,8 @@ def main(argv=None):
     parser.add_argument("--limit", type=int, help="Maximum returned rows; the whole sheet is still scanned")
     parser.add_argument("--max-return-cells", type=int, default=500000,
                         help="Maximum retained rows times projected columns (default 500000)")
+    parser.add_argument("--shared-string-memory-bytes", type=int, default=DEFAULT_SHARED_STRING_MEMORY,
+                        help="Retained shared-string value budget before temporary SQLite spill (default 16777216)")
     parser.add_argument("--reader", choices=("auto", "fast", "compatible"), default="auto")
     parser.add_argument("--cache-dir", type=Path, default=Path('.dd_cache/xlsx_query'))
     parser.add_argument("--no-cache", action="store_true", help="Disable the content-keyed query cache")
@@ -996,6 +1272,7 @@ def main(argv=None):
                             reader=args.reader, cache_dir=None if args.no_cache else args.cache_dir,
                             key_rows=key_rows,
                             max_return_cells=args.max_return_cells,
+                            shared_string_memory_bytes=args.shared_string_memory_bytes,
                             progress=lambda count: print(f"Scanned {count} rows", file=sys.stderr, flush=True))
         output = args.out.expanduser().resolve()
         if (output == args.file.expanduser().resolve()
@@ -1011,7 +1288,7 @@ def main(argv=None):
                     handle.write(json.dumps(row, ensure_ascii=False) + "\n")
         else:
             output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    except (OSError, ValueError, KeyError, BadZipFile, ET.ParseError) as exc:
+    except (OSError, ValueError, KeyError, sqlite3.Error, BadZipFile, ET.ParseError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     print(json.dumps({"out": str(output), "coverage": result["coverage"],
@@ -1020,4 +1297,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == '--validate-worksheet-worker':
+        raise SystemExit(_validate_worksheet_worker(sys.argv[2], sys.argv[3]))
     raise SystemExit(main())

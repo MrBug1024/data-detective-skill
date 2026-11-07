@@ -1,4 +1,4 @@
-"""DATA/ENTITY/CRIMINAL coordination with source-addressable, bounded outputs."""
+"""Source-addressable extraction helpers retained for library compatibility."""
 import datetime
 import json
 import os
@@ -10,9 +10,7 @@ from pathlib import Path
 from parsers import FileParser
 from indexer import build_index
 from matcher import MatchConfig
-from linker import ChainLinker
 from entity_extractor import EntityExtractor
-from criminal import build_case_packet
 from entity_resolution import candidate_groups
 from ingestion_support import sha256_file
 
@@ -28,7 +26,6 @@ def unit_location(unit):
 class Investigation:
     def __init__(self):
         self.investigation_id = str(uuid.uuid4())
-        self.investigation_type = "auto"
         self.target = ""
         self.timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
         self.confidence = None
@@ -94,9 +91,9 @@ class Investigator:
                                             "status": status["status"], "issues": status.get("issues", [])})
         return self._index
 
-    def _report(self, mode, target):
+    def _report(self, target):
         inv = Investigation()
-        inv.investigation_type, inv.target = mode, target
+        inv.target = target
         inv._source_files = list(self._source_files)
         inv._config = self.config
         inv.missing = list(self._source_issues)
@@ -115,58 +112,10 @@ class Investigator:
         return inv
 
     def trace_data(self, result_file, result_row, source_files, result_sheet=None):
-        result_file = os.path.abspath(result_file)
-        result = self.fp.parse_result_row(result_file, result_row, sheet_name=result_sheet)
-        result_diagnostics = list(getattr(self.fp, "last_diagnostics", []))
-        if result is None:
-            raise ValueError(f"结果文件中未找到第 {result_row} 行")
-        self.load_sources(source_files)
-        inv = self._report("data", f"{os.path.basename(result_file)} 第{result_row}行")
-        inv.result_ref = {"file": result_file, "row": result_row, "sheet": result.sheet_name}
-        inv.result_ref["sha256"] = sha256_file(result_file)
-        inv.result_ingestion_issues = result_diagnostics
-        result_incomplete = any(i.get('severity') in ('warning', 'error') for i in result_diagnostics)
-        if result_incomplete:
-            inv.missing.append({"type": "result_ingestion_incomplete", "reason": result_file,
-                                "issues": result_diagnostics})
-        chain = ChainLinker(self._index, self.match_config).build_chain(result, self._source_files)
-        inv.chain = {"nodes": [n.to_dict() for n in chain.nodes],
-                     "edges": [e.to_dict() for e in chain.edges]}
-        inv.evidence = [e.to_dict() for e in chain.evidence]
-        inv.missing.extend(chain.missing)
-        inv.conflicts = chain.conflicts
-        inv.source_locations = chain.source_locations
-        inv.confidence = chain.confidence
-        inv.confidence_semantics = "heuristic_match_score_not_probability_or_verified_lineage"
-        inv.analysis_stage = "candidate_links"
-        inv.coverage = dict(getattr(chain, "coverage", {}))
-        inv.coverage["source_files_requested"] = len(self._source_files)
-        inv.coverage["ingestion_complete"] = not self._source_issues and not result_incomplete
-        inv.result_ref["location"] = unit_location(result)
-        inv.conclusions = [{"id": h.get("hypothesis_id", f"c{i}"),
-                            "statement": h.get("statement", ""),
-                            "confidence": h.get("confidence"), "status": "tentative",
-                            "supporting_nodes": h.get("supporting_nodes", []),
-                            "supporting_evidence": h.get("supporting_evidence", []),
-                            "counter_evidence": h.get("counter_evidence", []),
-                            "missing_evidence": h.get("missing_items", []),
-                            "reasoning": "候选匹配；真实派生需计算规则/执行日志复核"}
-                           for i, h in enumerate(chain.hypotheses)]
-        selected = [result] + [self._index.get_unit(n.node_id.removeprefix("src_"))
-                               for n in chain.nodes if n.node_type != "result"]
-        for unit in selected:
-            if unit is None:
-                continue
-            entities, events = self.extractor.extract_from_unit(unit)
-            for entity in entities:
-                claim = entity.to_dict()
-                claim.update(confidence_semantics="heuristic_extraction_score_not_identity", verification="unverified")
-                inv.entities.append(claim)
-            for event in events:
-                claim = event.to_dict()
-                claim.update(confidence_semantics="heuristic_extraction_score_not_event_truth", verification="unverified")
-                inv.timeline.append(claim)
-        inv.timeline = self._timeline(inv.timeline)
+        from trace_pipeline import trace_sources
+        inv = Investigation()
+        inv.__dict__.update(trace_sources(result_file, source_files, row=result_row,
+            result_sheet=result_sheet, cache_dir=self.cache_dir, config=self.config))
         return inv
 
     @staticmethod
@@ -184,7 +133,7 @@ class Investigator:
         if not target_name.strip():
             raise ValueError("调查目标不能为空")
         self.load_sources(source_files)
-        inv = self._report("entity", target_name)
+        inv = self._report(target_name)
         exact = self._index.lookup_exact(target_name)
         exact_ids = {u.unit_id for u in exact}
         candidates = self._index.lookup_tokens(target_name)
@@ -303,30 +252,3 @@ class Investigator:
             elif cls._contains(target, text):
                 return True
         return False
-
-    def investigate_criminal(self, target_desc, source_files):
-        if not target_desc.strip():
-            raise ValueError("调查目标不能为空")
-        self.load_sources(source_files)
-        inv = self._report("criminal", target_desc)
-        packet = build_case_packet(target_desc, self._all_units, self._index,
-                                   self.extractor, self.config)
-        packet["missing"] = inv.missing + packet["missing"]
-        inv.__dict__.update(packet)
-        inv.coverage["ingestion_complete"] = not self._source_issues
-        return inv
-
-    def investigate_event(self, target_desc, source_files):
-        """Compatibility alias for the renamed criminal mode."""
-        return self.investigate_criminal(target_desc, source_files)
-
-    def investigate_auto(self, target, source_files, result_file=None, result_row=None):
-        if result_file:
-            return self.trace_data(result_file, result_row or 2, source_files)
-        if re.fullmatch(r"[A-Z]{1,6}\d{3,20}", target, re.I) or re.fullmatch(r"[\u4e00-\u9fff]{2,30}(?:有限公司|集团|公司)", target):
-            inv = self.investigate_entity(target, source_files)
-            inv.routing = {"selected": "entity", "basis": "identifier_or_organization", "override": "--mode"}
-            return inv
-        inv = self.investigate_criminal(target, source_files)
-        inv.routing = {"selected": "criminal", "basis": "context_analysis_default; ambiguous names require explicit mode", "override": "--mode entity"}
-        return inv

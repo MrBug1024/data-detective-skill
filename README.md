@@ -1,170 +1,71 @@
-# Data Detective · 数据侦探
+# Data Detective · 专业数据溯源
 
-[![CI](https://github.com/MrBug1024/data-detective-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/MrBug1024/data-detective-skill/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+面向 Agent 的数据溯源 skill。输入结果表、业务标识或目标描述，在表格、JSON、数据库导出与文档中定位原始记录，核对字段对应、连接和计算规则，交付可复查证据与交互式溯源墙。
 
-面向 Agent 的数据溯源、实体核查与刑侦分析 skill。把分散的表格、文档和现场描述整理成**可定位的证据、可比较的解释和可执行的核查计划**。
-
-支持 Codex 等遵循 Agent Skills 格式的宿主；提供 Claude Code 的本地目录安装。技能名为 **`data-detective`**，版本 **3.2.3**，入口为 [SKILL.md](SKILL.md)。Python CLI 负责确定性检索与整理，Agent 继续完成规则核验和分析。
-
-| 模式 | 适用任务 | 输出 |
-|---|---|---|
-| DATA 数据溯源 | 对账、字段来源、关联规则、异常计算 | 来源位置、候选链路、覆盖缺口、显式规则重算 |
-| ENTITY 实体核查 | 人物/组织提及、同名消歧、关系核查 | 标识分组、来源属性、歧义与冲突 |
-| CRIMINAL 刑侦分析 | 案情梳理、证据解释、时间线重建 | 证据账本、竞争假说、调查优先级 |
-
-另含[面部特征与合成画像工作流](references/facial-composites.md)。本库编译可追溯的特征规格；实际生成图片需要宿主提供图像工具。
-
-## 通过 GitHub 链接安装
-
-### Codex：复制给 Agent
-
-将下面这句话发送给支持 `skill-installer` 的 Codex：
-
-```text
-使用 $skill-installer 从 https://github.com/MrBug1024/data-detective-skill 安装技能：仓库内路径为 .，安装名称为 data-detective。
-```
-
-根目录就是 skill，必须将仓库根路径 `.` 和安装名 `data-detective` 一并指定。安装器的默认目录由当前 Codex 环境决定；可在下一轮输入 `$data-detective` 使用，未出现时重启宿主。参见 [Codex 官方 skills 文档](https://learn.chatgpt.com/docs/build-skills)。
-
-`skill-installer` 只复制技能文件。运行 CLI 前，为实际使用的 Python 安装技能目录中的 `scripts/requirements.txt`；仅文字分析无需这些 Python 依赖。
-
-### 本地安装：Windows / macOS / Linux
-
-需要 Git 与 **Python 3.10+**。以下命令可在 PowerShell 或常见 Unix shell 中执行；`python` 不存在时使用本机的 `python3`。
-
-```sh
-git clone https://github.com/MrBug1024/data-detective-skill.git
-cd data-detective-skill
-python -m pip install -r scripts/requirements.txt
-python scripts/install_skill.py --target codex
-```
-
-建议在自己的 Python 虚拟环境中安装依赖；运行 CLI 时使用同一环境的解释器。安装脚本仅复制技能文件，不调用 pip、不联网，也不修改宿主配置。
-
-| 目标 | 命令 | 安装位置 |
-|---|---|---|
-| Codex | `python scripts/install_skill.py --target codex` | `~/.agents/skills/data-detective/` |
-| Claude Code | `python scripts/install_skill.py --target claude` | `~/.claude/skills/data-detective/` |
-| 自定义 skills 目录 | `python scripts/install_skill.py --dest /path/to/skills` | `/path/to/skills/data-detective/` |
-
-Windows 上 `~` 对应当前用户目录。自定义路径有空格时加引号；`--dest` 指定承载技能的 **skills 目录**（例如 `~/.agents/skills`），脚本会添加 `data-detective` 子目录。已有同名目录时会报错退出，更新前先备份并移走原安装；卸载时移除该技能目录即可。
-
-安装仅复制运行资源，开发测试、演示文件、运行结果、缓存及 `.env` 不会进入精简安装。
-
-### 下载 ZIP 安装
-
-正式版本的精简包见 [GitHub Releases](https://github.com/MrBug1024/data-detective-skill/releases)。下载 `data-detective.zip`，解压后将其中的 `data-detective/` 放到宿主的 skills 目录，再为执行 CLI 的 Python 安装包内 `scripts/requirements.txt`。
-
-GitHub 的 “Source code” 是完整源码快照；Release 中的 `data-detective.zip` 才是精简技能包。尚无 Release 时使用上面的仓库链接或本地安装方式。
+技能名 **data-detective**，版本 **4.0.0**。所有入口共用数据溯源流程；实体、日期、金额与标识抽取用于发现关联键和原文位置。
 
 ## 使用
 
-安装后向 Codex 发送：
+```text
+使用 $data-detective 追踪这份结果表的全部记录，找到原始来源和规则，解释字段差异，并生成溯源墙。
+```
+
+```powershell
+# 自动识别表头、按键定位、逐字段核对；默认首条数据
+python scripts/data_run.py trace --result result.xlsx --source-dir data --out-dir outputs/trace
+# 整份结果一次批量处理
+python scripts/data_run.py trace --result result.xlsx --all-rows --sources detail.xlsx summary.csv policy.md --out-dir outputs/batch
+# 只有线索时使用同一入口
+python scripts/data_run.py trace --target "订单 ORD-2026-001" --source-dir data --out-dir outputs/lookup
+# 有明确计算规则时执行计划
+python scripts/data_run.py reconcile --plan lineage-plan.json --rows 2 3 --out-dir outputs/check
+```
+
+在用户工作目录运行。安装后将 `scripts/` 替换为技能安装目录的绝对路径；输入原件只读，缓存和结果写在工作目录。`--source-dir` 默认当前层，`--recursive` 才包括子目录。复杂任务可显式列来源文件。
+
+每次产生报告、离线溯源墙、机器状态和进度事件。来源定位、文档证据、计算核验、规则适用与历史执行状态分别报告；Agent可以直接从终端最后一个完成事件取得本次产物路径和下一步动作。
+
+## 证据和规模
+
+- 稳定标识、复合键与作用域优先；字段值、名称和文本只作为各自层次的证据。多跳保留实际连接键来自哪条记录，冲突与竞争解释不丢弃。
+- 文件内容SHA、工作表/物理行/单元格、JSON Pointer，以及文档页/段/字符区间均可回查。原文复制不增加独立证据份数，文档指令不会被执行。
+- 表头探查按样本提取共享字符串，大表合并查询，不为每个结果行反复全扫。重复跨键查询可使用显式准备的源快照索引；首次构建与查询成本分别记录。
+- 返回预算、坏记录、损坏XML、读取失败、未覆盖范围和缓存失效均明确报告。拒绝或待决是可操作状态，不能用模糊相似覆盖精确标识冲突。
+- 明确规则下使用Decimal重算，保留来源记录、差额与舍入条件；计算相符不等于证明历史上执行过同一处理。
+
+结构化输入涵盖XLSX、CSV/TSV、JSON/JSONL/NDJSON及静态SQL导出；预算内旧XLS通过可选xlrd读取。文档覆盖TXT/MD、DOCX、数字PDF，扫描件通过绑定原件的OCR sidecar接入。不执行任意SQL，不默认调用外部模型或联网服务。
+
+详见 [技能入口](SKILL.md)、[配置和溯源工作流](references/data-lineage-workflow.md)、[执行与反馈](references/data-execution.md)、[格式与定位边界](references/file-ingestion.md)、[方法及验证依据](references/lineage-methods.md)。
+
+## 安装
+
+需要Python 3.10+。优先使用项目虚拟环境，并安装同一解释器的依赖：
+
+```powershell
+python -m pip install -r scripts/requirements.txt
+python scripts/install_skill.py --target codex
+# 或指定技能父目录
+python scripts/install_skill.py --dest /path/to/skills
+```
+
+安装只复制运行资源，不包含真实数据、测试答案、缓存或本地环境。已有同名目录不会被静默覆盖。可用 `python scripts/package_skill.py --out dist/data-detective.zip` 生成带SHA256的便携包。运行Python CLI无需API key。
+
+从源码安装时仓库根目录就是skill：
 
 ```text
-$data-detective 核查这份结果表的第 2 行，结合我提供的源表和规则，列出字段来源、计算依据和无法确认的部分。
+使用 $skill-installer 从 https://github.com/MrBug1024/data-detective-skill 安装技能，仓库内路径为 .，安装名称为 data-detective。
 ```
 
-```text
-$data-detective 梳理这些记录中“张三”的提及，区分同名人物，保留标识冲突，并给出需要补证的关系。
-```
+## 验证与开发
 
-```text
-$data-detective 根据我提供的现场描述和证词重建时间线，比较竞争解释，给出最优先的三项核查行动。
-```
-
-仅文字分析可以直接交给 Agent；运行本地 CLI 无需 API key。实际分析始终使用用户提供或已授权的材料。
-
-### 独立 CLI
-
-在源码根目录运行以下命令；安装后在自己的工作目录执行，并将 `scripts/` 替换为技能安装目录下的绝对路径。`--sources` 接收具体文件路径，不能依赖 shell 自动展开通配符。
-
-大型 XLSX 请先按稳定键使用 `scripts/xlsx_query.py` 定向读取，再连接主表、核对字段和重算。`trace` 是内存候选检索工具，不能直接替代整批大表核验。含标题行的工作簿通过 `--header-row` 显式指定真实表头；详见[大表定向溯源](references/data-entity-workflows.md#大型-xlsx-与整份结果溯源)。
-
-定向查询一次传入整批稳定键，并通过 `--columns` 限制返回字段。CLI 默认按源文件内容哈希复用 `.dd_cache/xlsx_query/` 中的查询结果；`--no-cache` 可禁用，文件内容变化会失效。读取支持快速路径与兼容回退，保留原行号、单元格和完整扫描统计。
-
-工作流由实际表头、字段角色、复合键、连接基数和计算计划驱动。性能样例用于验证实现，不将其行业、表名、固定表数或业务规则内置为通用逻辑。多组复合键通过 `--keys-json` 保留组合关系；未知布局或表达式必须显式适配并报告覆盖边界。
-
-```sh
-# DATA：物理行号包含表头；多 sheet 时明确指定工作表
-python scripts/detective.py trace --result result.xlsx --row 2 --sheet Sheet1 --sources source.xlsx rules.md --out report.json --no-html
-
-# ENTITY：检索提及并保留身份歧义
-python scripts/detective.py investigate --mode entity --target 张三 --sources records.csv note.md --out report.json --html wall.html
-
-# CRIMINAL：生成证据包，随后由 Agent 完成研判
-python scripts/detective.py investigate --mode criminal --target 核验现场线索 --sources scene.md statements.txt --out packet.json --html wall.html
-
-# 按原模式、配置和来源加入新材料重新核查
-python scripts/detective.py validate --report report.json --new-evidence supplement.csv --out revised.json --no-html
-
-# 按明确规则重算，计划格式见 references/data-entity-workflows.md
-python scripts/reconcile.py --plan lineage-plan.json --out reconciliation.json
-
-# 同一计划整批核验结果物理行，共享来源读取与查询
-python scripts/reconcile.py --plan lineage-plan.json --rows 2 3 4 --out batch-reconciliation.json
-
-# 编译面部特征规格；此命令不生成图片
-python scripts/detective.py portrait --case observations.json --out portrait.json --prompt-out portrait-prompt.txt
-```
-
-可用源码内的合成样例快速验证：
-
-```sh
-python scripts/detective.py trace --result examples/R1.xlsx --row 2 --sources examples/A.xlsx examples/B.xlsx examples/C.xlsx examples/D.xlsx examples/rules.md --out demo-report.json --no-html
-```
-
-## 支持范围
-
-支持 CSV/TSV/XLSX/TXT/MD、数字 PDF、DOCX 正文与表格，以及 SQL 静态字面量。扫描件和图片通过绑定原件哈希的 OCR/视觉转录 sidecar 接入；本库不自带 OCR 引擎。旧 DOC 需可信转换；旧 XLS 另装 `xlrd`。详情见[文件摄取与覆盖](references/file-ingestion.md)。
-
-- 检索分用于排序候选，不能视为正确率或有罪概率。同名不自动合并为同人。
-- `evidence_packet_only` 表示证据整理包，Agent 仍需完成竞争假说、证据解释与调查计划，并另存分析报告。
-- `reconciled_not_proven_lineage` 仅证明指定计划重算相符；历史血缘仍需公式、代码或执行日志。
-- 检查 `coverage`、`missing` 及截断提示；ENTITY 可使用 `--start` / `--limit` 分页，不能只读首批就声称完整排查。
-- 面部规格与心理、地理画像只能生成待检验线索。低清增强生成的细节不能回填为原图证据。
-
-模式细节见[数据与实体工作流](references/data-entity-workflows.md)、[刑侦工作流](references/criminal-workflow.md)及 [JSON schemas](schemas/)。旧 `--mode event` 保留为 `criminal` 的兼容别名。
-
-## 开发与验证
-
-```sh
+```powershell
 python -m pip install -r requirements-dev.txt
 python scripts/package_skill.py --check
 python -m unittest discover -s tests -v
-python scripts/package_skill.py --out dist/data-detective.zip
+python test/lineage/run_eval.py --help
+python scripts/benchmark.py --help
 ```
 
-打包采用运行资源白名单，并生成 SHA-256 校验文件。CI 在 Windows 与 Linux 执行结构检查、回归测试和打包；测试只运行本地合成数据，不调用模型服务。
+[多场景评测](test/README.md)保留原始输入、独立预期和完整产物，逐项检查误连、漏连、歧义、覆盖、引用及冷/热性能。实际测量只说明所覆盖的数据，不能把某个小样例得分解释为所有材料上的准确率。
 
-另有[合成案件盲测](test/README.md)、[画像专项评测](test/portrait/README.md)与[跨格式行为评测](test/data_entity/README.md)。只有显式 `--live` 的模型盲测会联网并使用配置的模型服务；这些评测不构成真实案件准确率承诺。评分夹具不放进精简包，独立 Agent 测试需另外隔离评分材料。
-
-[跨结构回归](tests/test_schema_variants.py)独立生成电商、制造和物流样例，调用公开接口验证改名/重排、晚表头、多工作表、复合键、1对多、长表到宽表、分组聚合及 CSV→SQL→XLSX 多跳。缺列、缺连接、重复唯一键、缺公式缓存和截断均单独验证；这些用例不依赖性能示例的数据、行业字段或业务公式。验证范围是明确映射、关联关系和规则后的管线，不代表可以无依据推断任意业务逻辑。
-
-```text
-SKILL.md                技能入口与调用范围
-agents/openai.yaml      Codex 展示名称和默认提示
-scripts/                CLI、安装器、打包器
-references/             按需加载的专业工作流
-schemas/                输入、输出与配置约定
-examples/               可复现的合成样例（仅源码）
-tests/、test/            回归测试与评测材料（仅源码）
-.github/workflows/      CI 与 Release 自动化（仅源码）
-```
-
-## 发布版本
-
-先更新 `SKILL.md` 的 `metadata.version` 与本页版本号，运行上述检查并提交。推送与版本一致的标签即可触发 Release：
-
-```sh
-git tag v3.2.3
-git push origin main
-git push origin v3.2.3
-```
-
-也可以在 GitHub Actions 的 Release 工作流中手动填写已存在标签对应的版本发布。工作流核对版本、在 Python 3.10 和 3.13 上执行验证和测试，然后上传精简 ZIP 与 SHA-256；已存在的 Release 不会被覆盖。固定版本安装时可将 GitHub 链接指定为 `https://github.com/MrBug1024/data-detective-skill/tree/v3.2.3`，仓库内路径仍为 `.`，安装名称仍为 `data-detective`。
-
-## 许可证
-
-本项目采用 [Apache License 2.0](LICENSE)。
+4.x将 `detective.py` 作为统一命令入口的别名，`trace.py` 等价于 `data_run.py trace`。Python的 `DataDetective.trace` 同样进入通用管线，输出的匹配分不再伪装为置信概率。批处理请消费 `status.json` 和退出码，不依赖旧版控制台文案。

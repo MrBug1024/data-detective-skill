@@ -1,4 +1,4 @@
 interface:
-  display_name: "Data Detective 数据侦探"
-  short_description: "数据溯源、实体核查与案情分析，输出可定位证据、竞争解释和调查计划"
-  default_prompt: "使用 $data-detective 分析我提供的材料，给出可追溯证据、当前结论、关键缺口和下一步核查计划。"
+  display_name: "Data Detective 数据溯源"
+  short_description: "追踪原始记录、字段变换与文档证据，核对连接和计算并生成可交互溯源墙"
+  default_prompt: "使用 $data-detective 追踪这批数据的来源，核对字段、连接与计算规则，交付可定位证据和溯源墙，并明确未决项。"

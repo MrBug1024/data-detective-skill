@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 from unittest import mock
 from xml.sax.saxutils import escape
@@ -555,6 +556,172 @@ class StreamingQueryTests(unittest.TestCase):
         run = subprocess.run([sys.executable, str(ROOT / 'scripts/xlsx_query.py'), '--file', str(source), '--max-return-cells', '0', '--no-cache', '--out', str(output)], capture_output=True, text=True)
         self.assertEqual(run.returncode, 2)
         self.assertFalse(output.exists())
+
+    def test_spilled_shared_strings_match_memory_reader_and_preserve_exact_values(self):
+        source = self.workbook([
+            row(1, '<c r="A1" t="s"><v>0</v></c>', text_cell('B1', 'Amount')),
+            row(2, '<c r="A2" t="s"><v>1</v></c>', number_cell('B2', '10.0000000000001')),
+            row(8, '<c r="A8" t="s"><v>2</v></c>', number_cell('B8', '20')),
+            row(12, '<c r="A12" t="s"><v>3</v></c>', number_cell('B12', '30')),
+        ], strings='<si><t>ID</t></si><si><t>0007</t></si><si><t>7</t></si>'
+                   '<si><r><t>00</t></r><r><t>07</t></r><rPh><t>exclude</t></rPh></si>')
+        expected = query_xlsx(source, where={'ID': ['0007']}, shared_string_memory_bytes=65536)
+        for reader in ('fast', 'compatible'):
+            with self.subTest(reader=reader):
+                actual = query_xlsx(source, where={'ID': ['0007']}, reader=reader,
+                                    shared_string_memory_bytes=1)
+                self.assertEqual(actual['rows'], expected['rows'])
+                self.assertEqual(actual['coverage'], expected['coverage'])
+                self.assertEqual([r['row_num'] for r in actual['rows']], [2, 12])
+                self.assertEqual(actual['shared_strings']['backend'], 'sqlite')
+                self.assertEqual(actual['shared_strings']['count'], 4)
+                self.assertLessEqual(actual['shared_strings']['peak_retained_value_bytes_estimate'], 1)
+
+    def test_shared_string_spill_cleans_temporary_evidence_on_success_and_failure(self):
+        source = self.shared_fixture()
+        paths = []
+        original = tempfile.TemporaryDirectory
+
+        def temporary(*args, **kwargs):
+            directory = original(*args, **kwargs)
+            paths.append(Path(directory.name))
+            return directory
+
+        with mock.patch.object(xlsx_query.tempfile, 'TemporaryDirectory', side_effect=temporary):
+            query_xlsx(source, shared_string_memory_bytes=1)
+            self.rewrite_sheet(source, lambda data: data.replace(b'<v>2</v>', b'<v>9999</v>'))
+            with self.assertRaisesRegex(ValueError, 'Invalid shared-string'):
+                query_xlsx(source, shared_string_memory_bytes=1)
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(all(not path.exists() for path in paths))
+
+    def test_spill_bounds_python_retention_for_large_high_cardinality_string_table(self):
+        # The result needs one value out of 8 MiB of unrelated shared strings.
+        # Checking Python allocation catches accidental materialization of the
+        # full table. This deliberately does not claim to measure native RSS.
+        source = self.workbook([
+            row(1, '<c r="A1" t="s"><v>0</v></c>'),
+            row(2, '<c r="A2" t="s"><v>8000</v></c>'),
+        ], strings='<si><t>ID</t></si>' + ''.join(
+            '<si><t>' + str(index).zfill(8) + 'x' * 1024 + '</t></si>'
+            for index in range(8000)))
+        tracemalloc.start()
+        try:
+            result = query_xlsx(source, shared_string_memory_bytes=32768)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(result['rows'][0]['values']['ID'], '00007999' + 'x' * 1024)
+        self.assertEqual(result['shared_strings']['backend'], 'sqlite')
+        self.assertLessEqual(result['shared_strings']['peak_retained_value_bytes_estimate'], 32768)
+        self.assertLess(peak, 4 * 1024 * 1024)
+
+    def test_shared_string_cache_hit_reports_original_storage_without_loading(self):
+        source = self.shared_fixture()
+        cache = self.root / 'strings-cache'
+        cold = query_xlsx(source, where={'ID': ['keep']}, cache_dir=cache, shared_string_memory_bytes=1)
+        with mock.patch.object(xlsx_query, '_shared_strings', side_effect=AssertionError('warm query loaded SST')):
+            warm = query_xlsx(source, where={'ID': ['keep']}, cache_dir=cache, shared_string_memory_bytes=1)
+        self.assertEqual(warm['rows'], cold['rows'])
+        self.assertTrue(warm['cache']['hit'])
+        self.assertEqual(warm['shared_strings']['backend'], 'sqlite')
+        self.assertEqual(warm['shared_strings']['metrics_scope'], 'original_scan; not loaded on cache hit')
+        self.assertEqual(cold['shared_strings']['metrics_scope'], 'current_scan')
+
+    def test_legacy_cache_and_changed_memory_budget_do_not_rescan_identical_evidence(self):
+        source = self.shared_fixture()
+        cache = self.root / 'legacy-strings-cache'
+        cold = query_xlsx(source, where={'ID': ['keep']}, cache_dir=cache, shared_string_memory_bytes=65536)
+        path = Path(cold['cache']['path'])
+        saved = json.loads(path.read_text(encoding='utf-8'))
+        del saved['result']['shared_strings']  # Validated pre-spill reader output.
+        path.write_text(json.dumps(saved), encoding='utf-8')
+        with mock.patch.object(xlsx_query, '_query_xlsx_core', side_effect=AssertionError('storage budget invalidated evidence')):
+            warm = query_xlsx(source, where={'ID': ['keep']}, cache_dir=cache, shared_string_memory_bytes=1)
+        self.assertEqual(warm['rows'], cold['rows'])
+        self.assertEqual(warm['cache']['key'], cold['cache']['key'])
+        self.assertEqual(warm['shared_strings']['backend'], 'not_recorded')
+        self.assertIn('not loaded on cache hit', warm['shared_strings']['metrics_scope'])
+
+    def test_shared_string_budget_validation_and_cli(self):
+        source = self.shared_fixture()
+        for value in (None, 0, -1, True, 1.5, '100'):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'shared_string_memory_bytes must be a positive integer'):
+                    query_xlsx(source, shared_string_memory_bytes=value)
+        output = self.root / 'spilled.json'
+        run = subprocess.run([sys.executable, str(ROOT / 'scripts/xlsx_query.py'), '--file', str(source),
+                              '--shared-string-memory-bytes', '1', '--no-cache', '--out', str(output)],
+                             capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        result = json.loads(output.read_text(encoding='utf-8'))
+        self.assertEqual(result['shared_strings']['backend'], 'sqlite')
+        self.assertEqual(result['coverage']['returned_rows'], 2)
+
+    def test_parallel_validation_preserves_evidence_and_reaps_worker(self):
+        source = self.shared_fixture()
+        normal = query_xlsx(source, where={'ID': ['keep']})
+        processes = []
+        original = subprocess.Popen
+
+        def launch(*args, **kwargs):
+            process = original(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with mock.patch.object(xlsx_query, 'PARALLEL_XML_THRESHOLD_BYTES', 0), \
+                mock.patch.object(xlsx_query.subprocess, 'Popen', side_effect=launch):
+            parallel = query_xlsx(source, where={'ID': ['keep']})
+        self.assertEqual(parallel['rows'], normal['rows'])
+        self.assertEqual(parallel['coverage'], normal['coverage'])
+        self.assertEqual(parallel['xml_validation']['mode'], 'parallel_process')
+        self.assertEqual(len(processes), 1)
+        self.assertEqual(processes[0].returncode, 0)
+        self.assertTrue(processes[0].stderr.closed)
+
+    def test_parallel_validation_rejects_invalid_trailing_xml_without_cache(self):
+        source = self.shared_fixture()
+        self.rewrite_sheet(source, lambda data: data + b'<unexpected/>')
+        cache = self.root / 'bad-parallel-cache'
+        with mock.patch.object(xlsx_query, 'PARALLEL_XML_THRESHOLD_BYTES', 0):
+            with self.assertRaisesRegex(ValueError, 'Complete worksheet XML validation failed'):
+                query_xlsx(source, where={'ID': ['keep']}, cache_dir=cache)
+        self.assertFalse(cache.exists())
+
+    def test_parallel_worker_cleanup_on_query_failure_and_safe_startup_fallback(self):
+        source = self.shared_fixture()
+        original = subprocess.Popen
+        processes = []
+
+        def launch(*args, **kwargs):
+            process = original(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with mock.patch.object(xlsx_query, 'PARALLEL_XML_THRESHOLD_BYTES', 0), \
+                mock.patch.object(xlsx_query.subprocess, 'Popen', side_effect=launch):
+            with self.assertRaisesRegex(ValueError, 'Returned cell budget'):
+                query_xlsx(source, where={'ID': ['keep', 'skip']}, max_return_cells=1)
+            # Unsupported comments switch to the compatible fully validating reader.
+            self.rewrite_sheet(source, lambda data: data.replace(b'<sheetData>', b'<sheetData><!--comment-->'))
+            fallback = query_xlsx(source, where={'ID': ['keep']})
+        self.assertTrue(all(process.poll() is not None and process.stderr.closed for process in processes))
+        self.assertEqual(fallback['reader'], 'compatible_xml')
+        with mock.patch.object(xlsx_query, 'PARALLEL_XML_THRESHOLD_BYTES', 0), \
+                mock.patch.object(xlsx_query.subprocess, 'Popen', side_effect=OSError('worker unavailable')):
+            self.assertEqual(query_xlsx(self.shared_fixture(), where={'ID': ['keep']})['xml_validation'],
+                             {'mode': 'in_process', 'complete': True, 'worker_start_fallback': 'OSError'})
+
+    def test_sample_string_lookup_skips_unneeded_trees_and_retains_rich_text(self):
+        source = self.workbook([row(1, '<c r="A1" t="s"><v>5000</v></c>')],
+                              strings='<si><t>unused</t></si>' * 5000 +
+                              '<si><r><t>record</t></r><r><t>_id</t></r><rPh><t>exclude</t></rPh></si>')
+        with mock.patch.object(xlsx_query, '_elements', side_effect=AssertionError('sample built shared string trees')):
+            result = inspect_xlsx(source, header_rows=1)
+        self.assertEqual(result['sheets'][0]['rows'][0]['values']['A'], 'record_id')
+        self.assertEqual(result['coverage']['shared_strings_retained'], 1)
+        self.assertEqual(result['coverage']['shared_string_entries_scanned'], 5001)
+        self.assertFalse(result['scan_complete'])
 
 
 if __name__ == '__main__':

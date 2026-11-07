@@ -20,8 +20,18 @@ def sha256_file(filepath):
     return digest.hexdigest()
 
 
+MAX_TEXT_INPUT_BYTES = 64 * 1024 * 1024
+
+
 def read_text(filepath):
-    data = Path(filepath).read_bytes()
+    # These callers materialize both source text and addressable units. Refuse
+    # before allocation; large delimited/JSONL data has a streaming query path.
+    with open(filepath, 'rb') as handle:
+        if Path(filepath).stat().st_size > MAX_TEXT_INPUT_BYTES:
+            raise ValueError('来源超过64MiB全量文本解析预算；CSV/TSV/JSONL请用scripts/record_query.py定向筛选，其他文本先按原始位置分段')
+        data = handle.read(MAX_TEXT_INPUT_BYTES + 1)
+    if len(data) > MAX_TEXT_INPUT_BYTES:
+        raise ValueError('来源在读取时超过全量文本解析预算，未返回部分结果')
     if data.startswith((b'\xff\xfe', b'\xfe\xff')):
         text, encoding = data.decode('utf-16'), 'utf-16'
     else:

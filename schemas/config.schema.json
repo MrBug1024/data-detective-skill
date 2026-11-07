@@ -1,69 +1,486 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "DataDetectiveConfig",
-  "description": "数据链路侦探配置",
+  "title": "Data lineage configuration",
+  "description": "统一溯源结构、精确键、来源范围和预算；拒绝未知选项。",
   "type": "object",
+  "additionalProperties": false,
   "properties": {
-    "fuzzy_threshold": {
-      "type": "number", "minimum": 0, "maximum": 100, "default": 80,
-      "description": "模糊匹配相似度阈值（0-100）"
+    "entity_aliases": {
+      "type": "object",
+      "propertyNames": {"type": "string", "minLength": 1},
+      "additionalProperties": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
     },
-    "semantic_threshold": {
-      "type": "number", "minimum": 0, "maximum": 1, "default": 0.6,
-      "description": "语义相似度阈值"
+    "scope_aliases": {
+      "type": "object",
+      "propertyNames": {"type": "string", "minLength": 1},
+      "additionalProperties": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
     },
-    "max_candidates": {
-      "type": "integer", "minimum": 1, "maximum": 200, "default": 20,
-      "description": "一次匹配返回候选的全局上限（规则候选亦计入）"
+    "result": {
+      "$ref": "#/definitions/result"
     },
-    "max_hops": {
-      "type": "integer", "minimum": 1, "maximum": 10, "default": 3,
-      "description": "保留配置；当前引擎未实现多跳搜索，不据此推断能力"
-    },
-    "criminal_max_units": {
-      "type": "integer", "minimum": 1, "maximum": 1000, "default": 100,
-      "description": "刑侦案件包最大返回单元数；遗漏计入coverage"
-    },
-    "criminal_max_chars": {
-      "type": "integer", "minimum": 100, "maximum": 20000, "default": 1600,
-      "description": "刑侦每证据单元最大字符数；截断计入coverage"
-    },
-    "entity_max_units": {
-      "type": "integer", "minimum": 1, "maximum": 1000, "default": 100
-    },
-    "entity_start": {"type": "integer", "minimum": 0, "default": 0},
-    "entity_max_chars": {"type": "integer", "minimum": 100, "maximum": 20000, "default": 1600},
-    "entity_identity_fields": {
-      "type": "array", "items": {"type": "string", "minLength": 1},
-      "description": "明确用于候选身份分组的字段；相同标识声明仍需核实"
+    "sources": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/source"
+      }
     },
     "field_aliases": {
-      "type": "object", "additionalProperties": {
-        "type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}
-      },
-      "description": "结果字段名到源字段名的显式映射；跨角色ID不能仅凭同值关联"
-    },
-    "known_key_fields": {
-      "type": "array", "items": { "type": "string" },
-      "description": "用户指定的关联键字段名列表",
-      "examples": [["客户ID", "订单ID", "产品代码"]]
-    },
-    "field_weights": {
       "type": "object",
-      "description": "字段匹配权重（字段名→权重）",
-      "additionalProperties": { "type": "number" },
-      "examples": [{ "客户ID": 2.0, "金额": 1.5 }]
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string",
+            "minLength": 1
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        ]
+      }
     },
-    "joint_fields": {
-      "type": "array",
-      "items": { "type": "array", "items": { "type": "string" } },
-      "description": "联合关联字段组",
-      "examples": [[["姓名", "日期"], ["产品代码", "数量"]]]
+    "max_result_rows": {
+      "type": "integer",
+      "minimum": 1
     },
-    "skip_fields": {
-      "type": "array", "items": { "type": "string" },
-      "description": "跳过的字段（不参与匹配）",
-      "default": ["序号", "index", "no.", "编号"]
+    "max_source_key_passes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "max_text_evidence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "unkeyed_text_max_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "text_max_source_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_source_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_units": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_terms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_candidate_chars": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_document_hops": {
+          "type": "integer", "minimum": 1, "maximum": 8
+        },
+        "max_lookup_seeds": {
+          "type": "integer", "minimum": 1, "maximum": 10000
+        }
+      }
+    }
+  },
+  "definitions": {
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "where": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        },
+        "key_rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reader": {
+          "enum": [
+            "auto",
+            "fast",
+            "compatible"
+          ]
+        },
+        "max_return_cells": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shared_string_memory_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "snapshot_dir": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sheet": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "header_row": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "encoding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "delimiter": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "reader": {
+          "enum": [
+            "auto",
+            "fast",
+            "compatible"
+          ]
+        },
+        "max_return_cells": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "snapshot_dir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "where": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        },
+        "query": {
+          "$ref": "#/definitions/query"
+        }
+      }
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sheet": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "header_row": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "encoding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "delimiter": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "reader": {
+          "enum": [
+            "auto",
+            "fast",
+            "compatible"
+          ]
+        },
+        "max_return_cells": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "snapshot_dir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "where": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        },
+        "query": {
+          "$ref": "#/definitions/query"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "key_map": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "field"
+                ],
+                "properties": {
+                  "field": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "file": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sheet": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "origin": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "field_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "skip": {
+          "type": "boolean"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sheet": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "header_row": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "encoding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "delimiter": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "reader": {
+          "enum": [
+            "auto",
+            "fast",
+            "compatible"
+          ]
+        },
+        "max_return_cells": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "snapshot_dir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "where": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        },
+        "query": {
+          "$ref": "#/definitions/query"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "key_map": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "field"
+                ],
+                "properties": {
+                  "field": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "file": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sheet": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "origin": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "field_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "skip": {
+          "type": "boolean"
+        },
+        "sheets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/table"
+          }
+        }
+      }
     }
   }
 }

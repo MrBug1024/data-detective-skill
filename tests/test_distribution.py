@@ -32,7 +32,7 @@ class TestDistribution(unittest.TestCase):
                 self.assertIn("data-detective/LICENSE", names)
                 self.assertIn("data-detective/scripts/detective.py", names)
                 self.assertIn("data-detective/scripts/requirements.txt", names)
-                self.assertIn("data-detective/schemas/criminal-analysis.schema.json", names)
+                self.assertIn("data-detective/schemas/lineage-plan.schema.json", names)
                 for name in names:
                     relative = Path(name).relative_to("data-detective")
                     self.assertEqual(archive.read(name), (installed / relative).read_bytes())
@@ -87,13 +87,13 @@ class TestDistribution(unittest.TestCase):
             source = parent / "records.csv"
             source.write_text("name,identifier\nAlice,A001\nBob,B002\n", encoding="utf-8")
             completed = subprocess.run(
-                [sys.executable, str(installed / "scripts/detective.py"), "investigate",
-                 "--mode", "entity", "--target", "Alice", "--sources", str(source),
-                 "--out", str(parent / "report.json"), "--no-html"],
+                [sys.executable, str(installed / "scripts/data_run.py"), "trace",
+                 "--target", "A001", "--sources", str(source),
+                 "--out-dir", str(parent / "run"), "--no-html"],
                 cwd=parent, capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
-            report = (parent / "report.json").read_text(encoding="utf-8")
+            report = (parent / "run" / "report.json").read_text(encoding="utf-8")
             self.assertIn("Alice", report)
             self.assertIn("A001", report)
 

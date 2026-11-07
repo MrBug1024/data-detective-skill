@@ -1,105 +1,128 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "DataChain",
-  "description": "数据链路侦探输出的候选数据链路",
+  "title": "Data lineage evidence graph",
+  "description": "report.chain：原始记录、文档声明与实际查询连接的可导航图；不声明历史执行已证明。",
   "type": "object",
-  "required": ["result_ref", "chain_id", "nodes", "edges", "confidence"],
+  "required": [
+    "nodes",
+    "edges",
+    "confidence"
+  ],
   "properties": {
-    "result_ref": {
-      "type": "object",
-      "description": "结果引用：结果表的一条记录",
-      "properties": {
-        "file": { "type": "string" },
-        "row": { "type": "integer" },
-        "fields": { "type": "array", "items": { "type": "string" } },
-        "values": { "type": "array", "items": {} }
-      }
-    },
-    "chain_id": {
-      "type": "string",
-      "description": "链路唯一ID"
-    },
     "nodes": {
       "type": "array",
-      "description": "链路节点列表",
       "items": {
         "type": "object",
+        "required": [
+          "node_id",
+          "node_type",
+          "label"
+        ],
         "properties": {
-          "node_id": { "type": "string" },
-          "node_type": { "type": "string", "enum": ["result", "source", "rule", "intermediate"] },
-          "label": { "type": "string" },
-          "source_file": { "type": "string" },
-          "file_type": { "type": "string" },
-          "row_num": { "type": ["integer", "null"] },
-          "page_num": { "type": ["integer", "null"] },
-          "paragraph_num": { "type": ["integer", "null"] },
-          "sheet_name": { "type": ["string", "null"] },
-          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-          "is_rule": { "type": "boolean" },
-          "raw_text_snippet": { "type": "string" }
+          "node_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "node_type": {
+            "enum": [
+              "result",
+              "source",
+              "rule",
+              "intermediate"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "source_file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sheet_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "row_num": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "field_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "field_values": {
+            "type": "array"
+          },
+          "confidence": {
+            "type": "null"
+          }
         }
       }
     },
     "edges": {
       "type": "array",
-      "description": "链路有向边",
       "items": {
         "type": "object",
+        "required": [
+          "edge_id",
+          "from_node",
+          "to_node",
+          "edge_type"
+        ],
         "properties": {
-          "edge_id": { "type": "string" },
-          "from_node": { "type": "string" },
-          "to_node": { "type": "string" },
-          "edge_type": {
-            "type": "string",
-            "enum": ["exact_id", "direct", "indirect", "fuzzy", "joint", "semantic", "rule", "inferred"]
+          "edge_id": {
+            "type": "string"
           },
-          "score": { "type": "number", "minimum": 0, "maximum": 1 },
-          "evidence": { "type": "string" }
+          "from_node": {
+            "type": "string"
+          },
+          "to_node": {
+            "type": "string"
+          },
+          "edge_type": {
+            "type": "string"
+          },
+          "relationship": {
+            "type": "string"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dependency_type": {
+            "enum": [
+              "DIRECT",
+              "INDIRECT"
+            ]
+          },
+          "score": {
+            "type": "null"
+          },
+          "evidence": {
+            "type": "string"
+          }
         }
       }
-    },
-    "evidence": {
-      "type": "array",
-      "description": "证据片段列表"
     },
     "confidence": {
-      "type": "number",
-      "description": "整体候选链路启发式匹配分0~1；不是正确率、已验证血缘或有罪概率",
-      "minimum": 0,
-      "maximum": 1
-    },
-    "missing": {
-      "type": "array",
-      "description": "缺失节点/字段列表",
-      "items": {
-        "type": "object",
-        "properties": {
-          "type": { "type": "string" },
-          "reason": { "type": "string" }
-        }
-      }
-    },
-    "conflicts": {
-      "type": "array",
-      "description": "冲突候选列表"
-    },
-    "hypotheses": {
-      "type": "array",
-      "description": "暂疑结论列表",
-      "items": {
-        "type": "object",
-        "properties": {
-          "hypothesis_id": { "type": "string" },
-          "type": { "type": "string" },
-          "statement": { "type": "string" },
-          "confidence": { "type": "number" },
-          "status": { "type": "string", "enum": ["tentative", "confirmed", "refuted"] }
-        }
-      }
-    },
-    "source_locations": {
-      "type": "array",
-      "description": "业务可寻址单元位置列表"
+      "type": "null",
+      "description": "逐条证据状态替代未经校准的总体正确概率。"
     }
   }
 }

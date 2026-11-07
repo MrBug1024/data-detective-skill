@@ -351,29 +351,32 @@ class GenericSchemaVariants(unittest.TestCase):
         self.assertEqual(Decimal(amount['actual']), Decimal('74.81'))
         self.assertEqual(Decimal(amount['difference']), Decimal('-0.01'))
 
-    def test_trace_cli_exposes_candidates_without_claiming_completed_lineage(self):
+    def test_trace_cli_locates_sources_without_claiming_historical_execution(self):
         source = self.csv('dispatch-lines.csv', ['order_ref', 'sku', 'units', 'line_value'],
                           [['EC-152', 'P-026', '3', '18.75'],
                            ['EC-153', 'P-027', '8', '18.75']])
         result = self.csv('picked-line.csv', ['order_ref', 'sku', 'line_value'],
                           [['EC-152', 'P-026', '18.75']])
-        output = self.root / 'candidate-report.json'
+        output = self.root / 'trace-output' / 'report.json'
         completed = subprocess.run(
             [sys.executable, str(ROOT / 'scripts/detective.py'), 'trace', '--result', str(result),
-             '--row', '2', '--sources', str(source), '--out', str(output), '--no-html'],
+             '--row', '2', '--sources', str(source), '--out-dir', str(output.parent), '--no-html'],
             cwd=self.root, capture_output=True, text=True, encoding='utf-8',
             env={**os.environ, 'PYTHONUTF8': '1'},
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         report = json.loads(output.read_text(encoding='utf-8'))
-        self.assertEqual(report['analysis_stage'], 'candidate_links')
+        self.assertEqual(report['analysis_stage'], 'source_trace')
         locations = [item for item in report['source_locations'] if Path(item['file']) == source]
         self.assertTrue(any(item['row'] == 2 for item in locations))
-        self.assertTrue(any(item['field_name'] == 'line_value'
-                            and Decimal(item['matched_value']) == Decimal('18.75')
-                            for item in report['evidence']))
+        matches = report['result_rows'][0]['source_matches']
+        self.assertEqual(1, len(matches))
+        self.assertEqual(Decimal('18.75'), Decimal(matches[0]['values']['line_value']))
+        self.assertTrue(any(item['result_field'] == 'line_value' and item['status'] == 'exact'
+                            for item in report['field_mappings']))
         self.assertTrue(report['conclusions'])
-        self.assertTrue(all(item['status'] == 'tentative' for item in report['conclusions']))
+        self.assertEqual('located', report['source_localization']['status'])
+        self.assertEqual('not_proven', report['historical_lineage']['status'])
 
     def compound_parcels(self):
         path = self.xlsx('parcel-register.xlsx',

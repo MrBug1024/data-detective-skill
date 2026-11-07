@@ -1,6 +1,6 @@
 """
 wall_renderer.py — 马赛克调查墙渲染器 v3
-电影级刑侦风格：暗夜主题 + Canvas力导向图 + 交互面板 + 时间线 + 证据库
+数据溯源交互布局：暗夜主题 + Canvas力导向图 + 交互面板 + 时间线 + 证据库
 """
 import json, os
 
@@ -17,7 +17,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>刑侦调查墙</title>
+<title>数据溯源 · 马赛克调查墙</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -423,9 +423,9 @@ window.addEventListener('load',()=>{
 
 function initTop(){
   const t=D.target||D.result_ref?.file||'';
-  document.getElementById('tt').textContent=(D.investigation_type?'['+D.investigation_type.toUpperCase()+'] ':'')+t;
+  document.getElementById('tt').textContent=t;
   document.getElementById('tid').textContent=D.investigation_id||D.chain_id||'—';
-  document.getElementById('ttype').textContent=D.investigation_type||'INVESTIGATION';
+  document.getElementById('ttype').textContent='DATA LINEAGE';
   const cf=D.confidence;
   const arc=document.getElementById('carc');
   const C=2*Math.PI*18;

@@ -145,7 +145,7 @@ def _tokenize(text: str) -> List[str]:
 def build_index(source_files: List[str], cache_dir: Optional[str] = None) -> SourceIndex:
     """
     构建源文件索引
-    cache_dir: 若指定，则尝试加载缓存（按文件修改时间）
+    cache_dir: 若指定，则尝试加载缓存（按内容哈希及解析版本）
     """
     # 计算缓存key
     if cache_dir:
@@ -183,6 +183,8 @@ def build_index(source_files: List[str], cache_dir: Optional[str] = None) -> Sou
     print(f"[INFO] Index built: {json.dumps(index.stats())}")
 
     if cache_dir:
+        if _cache_key(source_files) != cache_key:
+            raise RuntimeError('来源在索引构建期间发生变化，未保存混合版本缓存；请在来源稳定后重试')
         os.makedirs(cache_dir, exist_ok=True)
         index.save(cache_path)
         print(f"[INFO] Index cached to: {cache_path}")
@@ -194,7 +196,7 @@ def _cache_key(source_files: List[str]) -> str:
     """基于规范路径、精确时间戳、大小及内容哈希计算缓存key。"""
     # Bump when parser/tokenization behavior changes; old indexes must not leak
     # obsolete matching behavior into a revised engine.
-    parts = ["index-v10-multiformat-structured-rows-source-bound-ocr"]
+    parts = ["index-v11-json-pointers-bounded-text-docx-coverage"]
     paths = {os.path.normcase(os.path.abspath(p)) for p in source_files}
     # Sidecar presence, removal and edits are part of the actual source
     # snapshot; a valid original-file cache must not hide changed OCR text.

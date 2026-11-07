@@ -7,6 +7,7 @@ failure output are retained independently of the expected results.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -37,6 +38,16 @@ def expect(condition, message):
 
 def source_nodes(report):
     return [n for n in report.get("chain", {}).get("nodes", []) if n.get("node_type") != "result"]
+
+
+def source_matches(report):
+    registry = report.get('source_records', {})
+    return [{**registry.get(match.get('source_ref'), {}), **match}
+            for result in report.get('result_rows', []) for match in result.get('source_matches', [])]
+
+
+def evidence(report):
+    return report.get('related_evidence', report.get('evidence', []))
 
 
 def source_named(value, filename):
@@ -72,15 +83,18 @@ class Evaluation:
         self.expected = json.loads((Path(__file__).parent / "private" / "expected.json").read_text(encoding="utf-8"))
         self.started = time.monotonic()
 
-    def cli(self, case, target="ORD000417", sources=(), result=None, config=None):
-        output = self.raw / f"{case}.json"
-        args = [self.python, str(REPO / "scripts" / "detective.py")]
+    def cli(self, case, target="ORD000417", sources=(), result=None, config=None, limit=None):
+        out_dir = self.raw / case
+        output = out_dir / 'report.json'
+        args = [self.python, str(REPO / "scripts" / "data_run.py"), 'trace']
         if result:
-            args += ["trace", "--result", str(self.public / result), "--row", "2"]
+            args += ["--result", str(self.public / result), "--row", "2"]
         else:
-            args += ["investigate", "--mode", "entity", "--target", target]
+            args += ["--target", target]
+            if limit is not None:
+                args += ['--evidence-limit', str(limit)]
         args += ["--sources"] + [str(self.public / source) for source in sources]
-        args += ["--out", str(output), "--no-html", "--cache-dir", str(self.root / "cache")]
+        args += ["--out-dir", str(out_dir), "--no-html", "--cache-dir", str(self.root / "cache")]
         if config:
             config_path = self.raw / f"{case}.config.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -88,13 +102,21 @@ class Evaluation:
         completed = subprocess.run(args, cwd=REPO, encoding="utf-8", errors="replace", capture_output=True, timeout=60)
         (self.raw / f"{case}.stdout.txt").write_text(completed.stdout, encoding="utf-8")
         (self.raw / f"{case}.stderr.txt").write_text(completed.stderr, encoding="utf-8")
-        report = json.loads(output.read_text(encoding="utf-8")) if completed.returncode == 0 and output.is_file() else None
+        report = json.loads(output.read_text(encoding="utf-8")) if output.is_file() else None
+        status_file = out_dir / 'status.json'
+        expect(status_file.is_file(), 'CLI did not emit terminal status.json')
+        status = json.loads(status_file.read_text(encoding='utf-8'))
+        expect(status.get('exit_code') == completed.returncode, 'process exit code disagrees with machine status')
+        expect(status.get('state') in ('completed', 'partial', 'failed'), 'run never reached a terminal state')
+        if report is not None:
+            expect(status['artifacts']['report']['sha256'] == hashlib.sha256(output.read_bytes()).hexdigest(), 'report artifact hash is stale or wrong')
         return completed, report
 
     def entity(self, case, filename, target="ORD000417", config=None):
         completed, report = self.cli(case, target=target, sources=[filename], config=config)
-        expect(completed.returncode == 0, f"CLI exited {completed.returncode}; inspect raw stderr")
+        expect(completed.returncode in (0, 2), f"CLI execution failed ({completed.returncode}); inspect raw report/status")
         expect(report is not None, "successful CLI did not produce JSON report")
+        expect(report.get('analysis_stage') == 'evidence_search', 'target did not use the unified source search')
         return report
 
     def case(self, name, action, required=()):
@@ -119,23 +141,24 @@ class Evaluation:
 
     def format_case(self, case):
         report = self.entity(case["id"], case["file"])
-        evidence = report.get("evidence", [])
-        expect(bool(evidence), "target mention not retrieved")
-        expect(all(source_named(e.get("source_location", {}).get("file"), case["file"]) for e in evidence), "evidence location does not point to the original input file")
-        expect(all(e.get("verification") != "verified" for e in evidence), "copied mention was represented as verified identity evidence")
+        passages = evidence(report)
+        expect(bool(passages), "target mention not retrieved")
+        expect(all(source_named(e.get("source_location", {}).get("file"), case["file"]) for e in passages), "evidence location does not point to the original input file")
+        expect(all(e.get("verification") != "verified" for e in passages), "copied mention was represented as verified identity evidence")
         for key, value in case["locator"].items():
             expect(has_locator(report, key, value), f"original {key} locator missing or wrong; expected {value!r}")
         if case["file"] in ("records.csv", "records.xlsx", "dump.sql"):
-            expect(any("000417" in n.get("field_values", []) for n in source_nodes(report)), "literal identifier with leading zeroes was lost")
+            expect(any(m.get('raw_value') == '000417' for m in report.get('entity_mentions', [])), "literal identifier with leading zeroes was lost")
         if case["file"] == "receipt.png":
-            expect(report.get("coverage", {}).get("ingestion_complete") is False, "unverified OCR was represented as complete original evidence")
+            expect(report.get("coverage", {}).get("retrieval_complete") is False, "unverified OCR was represented as complete original evidence")
             expect(any(key == "ocr_verified" and value is False for key, value in flatten(report)), "OCR provenance lacks its unverified transcription state")
-        return {"evidence_count": len(evidence), "source_locations": report.get("source_locations", [])}
+        return {"evidence_count": len(passages), "source_locations": [p['source_location'] for p in passages]}
 
     def data_case(self, name, source, result="result.csv"):
         completed, report = self.cli(name, sources=[source], result=result)
-        expect(completed.returncode == 0 and report is not None, "trace CLI did not produce a report")
-        expect(report.get("analysis_stage") == "candidate_links", "candidate search unexpectedly represented as completed verified lineage")
+        expect(completed.returncode in (0, 2) and report is not None, "trace CLI did not produce a source report")
+        expect(report.get("analysis_stage") == "source_trace", "trace bypassed unified source localization")
+        expect(report.get('historical_lineage', {}).get('status') == 'not_proven', 'source correspondence became proven historical execution')
         return report
 
     def run(self):
@@ -144,7 +167,7 @@ class Evaluation:
 
         def d01():
             report = self.data_case("D01_same_amount_keys", "records.csv")
-            rows = [n.get("row_num") for n in source_nodes(report)]
+            rows = [n.get("row_num") for n in source_matches(report)]
             expect(rows == [2], f"same amount/name overrode a contradictory stable key: rows={rows}")
             expect(all(c.get("status") != "confirmed" for c in report.get("conclusions", [])), "candidate match became confirmed lineage")
             return {"source_rows": rows}
@@ -152,24 +175,27 @@ class Evaluation:
 
         def d02():
             report = self.data_case("D02_literal_zero_id", "zero_sources.csv", "zero_result.csv")
-            rows = [n.get("row_num") for n in source_nodes(report)]
+            rows = [n.get("row_num") for n in source_matches(report)]
             expect(rows == [3], f"literal IDs 417 and 000417 were conflated: rows={rows}")
             return {"source_rows": rows}
         self.case("D02_literal_zero_id", d02)
 
         def d03():
             report = self.data_case("D03_duplicate_key_conflict", "duplicate_key.csv")
-            expect(bool(report.get("conflicts")), "duplicate stable key with different values was silently collapsed")
-            values = [v for _, v in flatten(report["conflicts"])]
-            expect(3 in values and 2 in values, "conflict does not preserve both source row addresses")
-            return {"conflicts": report["conflicts"]}
+            candidates = source_matches(report)
+            expect(any(c.get('candidate_count') == 2 for c in candidates), 'duplicate-key candidate cardinality was hidden')
+            locations = [value for key, value in flatten(candidates) if key in ('row', 'row_num')]
+            expect(2 in locations and 3 in locations, 'duplicate-key comparison discarded an alternative source address')
+            expect(any(c.get('rejected_candidates') or c.get('candidate_alternatives') or c.get('status') == 'ambiguous' for c in candidates),
+                   'duplicate candidates have no recorded comparison or ambiguity')
+            return {'source_candidates': candidates}
         self.case("D03_duplicate_key_conflict", d03)
 
         def d04():
             inputs = [c["file"] for c in self.expected["format_cases"]]
             completed, report = self.cli("D04_mixed_format_trace", sources=inputs, result="result.csv")
-            expect(completed.returncode == 0 and report is not None, "mixed-format trace CLI failed")
-            included = {Path(n["source_file"]).name for n in source_nodes(report)}
+            expect(completed.returncode in (0, 2) and report is not None, "mixed-format trace CLI failed")
+            included = {Path(n['file']).name for n in source_matches(report)} | {Path(e['source_location']['file']).name for e in evidence(report)}
             expect(included == set(inputs), f"mixed-format candidate trace omitted sources: {sorted(set(inputs) - included)}")
             expect(all(c.get("status") != "confirmed" for c in report.get("conclusions", [])), "copied cross-format records became confirmed lineage")
             return {"included_sources": sorted(included), "evidence_count": len(report.get("evidence", []))}
@@ -177,14 +203,14 @@ class Evaluation:
 
         def e01():
             report = self.entity("E01_same_name_shared_phone", "people.csv", "陈宁")
-            expect(len(report.get("evidence", [])) == 2, "same-name mentions lost or shared-phone nonmatch included")
-            conflicts = [c for c in report.get("conflicts", []) if c.get("type") == "identity_unresolved"]
-            expect(any(set(c.get("candidates", [])) == {"P0001", "P0002"} for c in conflicts), "different person IDs were not preserved as identity ambiguity")
-            targets = [e for e in report.get("entities", []) if e.get("entity_id") == "target_entity"]
-            expect(targets and targets[0].get("identity_status") == "unresolved", "name/shared phone wrongly resolved identity")
-            claims = targets[0].get("attribute_claims", {})
-            expect({c["value"] for c in claims.get("城市", [])} == {"北京", "上海"}, "later same-name attribute overwrote earlier source claim")
-            return {"evidence_count": 2, "identity_conflicts": conflicts, "candidate_entities": report.get("candidate_entities", [])}
+            passages = evidence(report)
+            expect(len(passages) == 2, "same-name mentions lost or shared-phone nonmatch included")
+            mentions = report.get('entity_mentions', [])
+            expect({m['raw_value'] for m in mentions if m['identifier_namespace'] == 'person'} == {'P0001', 'P0002'}, 'same-name distinct person IDs were not preserved')
+            expect(all(m.get('identity_verified') is False for m in mentions), 'name/shared phone wrongly resolved identity')
+            cities = {value for key, value in flatten(passages) if key in ('城市', 'raw_value', 'text') and value in ('北京', '上海')}
+            expect(cities == {'北京', '上海'}, 'later same-name attribute overwrote or removed earlier source claim')
+            return {'evidence_count': 2, 'person_ids': sorted(m['raw_value'] for m in mentions if m['identifier_namespace'] == 'person'), 'cities': sorted(cities)}
         self.case("E01_same_name_shared_phone", e01)
 
         def e02():
@@ -197,43 +223,38 @@ class Evaluation:
         self.case("E02_negated_relationship", e02)
 
         def e03():
-            completed, report = self.cli("E03_bounded_coverage", "陈宁", ["many.csv", "many.csv"], config={"entity_max_units": 3})
-            expect(completed.returncode == 0 and report is not None, "bounded entity search failed")
+            completed, report = self.cli("E03_bounded_coverage", "陈宁", ["many.csv", "many.csv"], limit=3)
+            expect(completed.returncode == 2 and report is not None, "bounded search must finish partial rather than hide truncation")
             coverage = report.get("coverage", {})
-            expect((coverage.get("matched_units"), coverage.get("included_units"), coverage.get("omitted_units")) == (7, 3, 4), "duplicate path or truncation produced inaccurate coverage")
-            expect(len(report.get("evidence", [])) == 3, "bounded output size is incorrect")
-            expect(any(m.get("type") == "context_truncated" for m in report.get("missing", [])), "omitted records are not actionable in missing items")
+            expect((coverage.get("matched_units"), coverage.get("returned_units"), coverage.get('matched_units', 0) - coverage.get('returned_units', 0)) == (7, 3, 4), "duplicate path or truncation produced inaccurate coverage")
+            expect(len(evidence(report)) == 3, "bounded output size is incorrect")
+            expect(coverage.get('truncated') is True and any(m.get('code') == 'evidence_return_limit' for m in report.get('issues', [])), 'omitted records are not actionable')
             return {"coverage": coverage}
         self.case("E03_bounded_coverage", e03)
 
         def i01():
             completed, report = self.cli("I01_missing_source", sources=["records.csv", "does-not-exist.csv"])
-            expect(completed.returncode != 0 or any(m.get("type") == "missing_source" for m in (report or {}).get("missing", [])), "missing source silently treated as a fully searched source")
-            if report is not None:
-                expect(report.get("coverage", {}).get("ingestion_complete") is False, "missing source did not lower ingestion coverage")
-            return {"returncode": completed.returncode, "missing": (report or {}).get("missing", [])}
+            expect(completed.returncode == 2 and report is not None, 'mixed available/missing sources did not produce partial status')
+            expect(report.get('coverage', {}).get('retrieval_complete') is False, 'missing source did not lower coverage')
+            expect(any(Path(i.get('file', '')).name == 'does-not-exist.csv' and i.get('severity') == 'error' for i in report.get('issues', [])), 'missing file lacks an original-source error')
+            return {"returncode": completed.returncode, "issues": report.get('issues', [])}
         self.case("I01_missing_source", i01)
 
         def i02():
             completed, report = self.cli("I02_malformed_source", target="陈宁", sources=["malformed.csv"])
-            if completed.returncode == 0:
-                expect(report is not None and bool(report.get("missing")), "malformed CSV silently accepted as a successful empty source")
-                expect(not report.get("evidence"), "malformed columns became misattributed evidence")
-                expect(any(m.get("type") in ("parse_error", "ingestion_failed", "source_parse_error") for m in report["missing"]), "malformed source has no explicit parse-failure diagnosis")
-            else:
-                expect("malformed.csv" in completed.stderr and ("ValueError" in completed.stderr or "RuntimeError" in completed.stderr), "negative case failed for an unrelated reason rather than rejecting its malformed source")
-            return {"returncode": completed.returncode, "missing": (report or {}).get("missing", [])}
+            expect(completed.returncode == 1 and report is not None, 'malformed source did not fail explicitly')
+            expect(not evidence(report), 'malformed columns became misattributed evidence')
+            expect(any(Path(i.get('file', '')).name == 'malformed.csv' and i.get('type') in ('ValueError', 'RuntimeError') for i in report.get('issues', [])), 'failure did not diagnose the actual malformed source')
+            return {"returncode": completed.returncode, "issues": report.get('issues', [])}
         self.case("I02_malformed_source", i02)
 
         def i03():
             completed, report = self.cli("I03_image_without_ocr", sources=["without_ocr.png"])
-            if completed.returncode == 0:
-                expect(report.get("coverage", {}).get("ingestion_complete") is False, "image without OCR silently treated as fully searched")
-                expect(any(key == "code" and value == "image_needs_ocr" for key, value in flatten(report.get("ingestion", {}))), "image without OCR has no actionable extraction diagnosis")
-            else:
-                expect("without_ocr.png" in completed.stderr, "unprocessed image case failed for an unrelated reason")
-            expect(not (report or {}).get("evidence"), "unread image invented evidence")
-            return {"returncode": completed.returncode, "missing": (report or {}).get("missing", [])}
+            expect(completed.returncode in (1, 2) and report is not None, 'unread image unexpectedly completed')
+            expect(report.get('coverage', {}).get('retrieval_complete') is False, 'unread image marked fully searched')
+            expect(any(i.get('code') == 'image_needs_ocr' for i in report.get('issues', [])), 'unread image lacks actionable OCR diagnosis')
+            expect(not evidence(report), "unread image invented evidence")
+            return {"returncode": completed.returncode, "issues": report.get('issues', [])}
         self.case("I03_image_without_ocr", i03, ["receipt.png"])
 
         def c01():
@@ -276,7 +297,8 @@ class Evaluation:
                 sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
                 completed, report = self.cli("C03_sidecar_source_mismatch", sources=["receipt.png"])
                 expect(completed.returncode != 0, "OCR transcription bound to another image was silently trusted")
-                expect(report is None and "receipt.png" in completed.stderr, "source-hash mismatch did not fail at the actual input")
+                expect(report is not None and not evidence(report), 'hash mismatch must retain a failure report without evidence')
+                expect(any(Path(i.get('file', '')).name == 'receipt.png' and 'sha256' in i.get('message', '') for i in report.get('issues', [])), 'hash mismatch did not name the actual input')
             finally:
                 sidecar_path.write_text(original, encoding="utf-8")
             return {"mismatched_source_hash_rejected": True}
@@ -284,13 +306,14 @@ class Evaluation:
 
         def f09():
             report = self.entity("F09_multiline_csv", "multiline.csv", "陈宁")
-            rows = sorted(loc.get("row") for loc in report.get("source_locations", []))
+            rows = sorted(item['source_location'].get('row') for item in evidence(report))
             expect(rows == [2, 4], f"multiline CSV logical record numbers were mistaken for physical rows: {rows}")
             return {"physical_rows": rows}
         self.case("F09_multiline_csv", f09)
 
         def f10():
-            report = self.entity("F10_gb18030_csv", "gb18030.csv", "陈宁")
+            report = self.entity("F10_gb18030_csv", "gb18030.csv", "陈宁",
+                                 config={'sources': {'gb18030.csv': {'encoding': 'gb18030'}}})
             expect(len(report.get("evidence", [])) == 1, "GB18030 source not retrieved")
             expect(has_locator(report, "row", 2), "GB18030 source physical row missing")
             return {"evidence_count": len(report["evidence"])}
@@ -316,9 +339,10 @@ class Evaluation:
             }
             plan_path = self.public / f"{case}.plan.json"
             plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
-            output = self.raw / f"{case}.json"
-            completed = subprocess.run([self.python, str(REPO / "scripts" / "reconcile.py"),
-                                        "--plan", str(plan_path), "--out", str(output)],
+            out_dir = self.raw / case
+            output = out_dir / 'report.json'
+            completed = subprocess.run([self.python, str(REPO / "scripts" / "data_run.py"), 'reconcile',
+                                        "--plan", str(plan_path), "--out-dir", str(out_dir), '--no-html'],
                                        cwd=REPO, encoding="utf-8", errors="replace", capture_output=True, timeout=60)
             (self.raw / f"{case}.stdout.txt").write_text(completed.stdout, encoding="utf-8")
             (self.raw / f"{case}.stderr.txt").write_text(completed.stderr, encoding="utf-8")
@@ -340,7 +364,7 @@ class Evaluation:
 
         def r02():
             completed, report = reconcile("R02_wrong_total", "bill_wrong.csv", "prices.xlsx")
-            expect(completed.returncode == 0 and report.get("status") == "mismatch", "incorrect total was not distinguished from arithmetic agreement")
+            expect(completed.returncode == 2 and report.get("status") == "mismatch", "incorrect total was not distinguished from arithmetic agreement")
             check = next(c for c in report["checks"] if c["result_field"] == "total")
             expect(check["calculated"] == "29.23" and check["difference"] == "0.01", "wrong-total delta is inaccurate")
             return {"status": report["status"], "total_check": check}
@@ -348,7 +372,8 @@ class Evaluation:
 
         def r03():
             completed, report = reconcile("R03_duplicate_price_key", "bill_correct.csv", "prices_duplicate.xlsx")
-            expect(completed.returncode != 0 and report.get("status") == "invalid_or_unavailable", "duplicate price key inflated or silently deduplicated a many-to-one join")
+            expect(completed.returncode == 1 and report.get('status') == 'error' and report.get('error', {}).get('type') == 'PlanError', 'duplicate price key did not fail as a plan cardinality error')
+            expect('不唯一' in report.get('error', {}).get('message', ''), 'failure was unrelated to duplicate join keys')
             expect(not report.get("checks"), "duplicate-key join produced apparently valid amount checks")
             return {"returncode": completed.returncode, "status": report["status"], "error": report.get("error")}
         self.case("R03_duplicate_price_key", r03, ["prices_duplicate.xlsx"])

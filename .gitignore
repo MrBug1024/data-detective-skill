@@ -76,12 +76,6 @@ private/
 
 # 合成评测夹具：只公开可重复评分必需的规范，其余 private 内容仍忽略。
 # private 表示不发送给被测模型，不表示这些合成规范是仓库机密。
-!/test/private/
-/test/private/*
-!/test/private/rubrics.json
-!/test/portrait/private/
-/test/portrait/private/*
-!/test/portrait/private/rubrics.json
 !/test/data_entity/private/
 /test/data_entity/private/*
 !/test/data_entity/private/expected.json

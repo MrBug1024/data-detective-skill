@@ -11,7 +11,8 @@ import zipfile
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
-from ingestion_support import read_text, ocr_sidecar, sql_records
+from ingestion_support import read_text, ocr_sidecar, sql_records, MAX_TEXT_INPUT_BYTES
+from json_records import decode_record, record_fields, iter_jsonl
 
 
 # The legacy parser materializes every row and cell before building several
@@ -307,6 +308,54 @@ class PDFParser:
         return units
 
 
+class JSONParser:
+    """Objects / arrays of objects and UTF-8 JSONL, with exact field pointers."""
+    MAX_UNITS = 100000
+    MAX_CELLS = 500000
+
+    def parse(self, filepath):
+        self.diagnostics = []
+        extension = Path(filepath).suffix.lower().lstrip('.')
+        if Path(filepath).stat().st_size > MAX_TEXT_INPUT_BYTES:
+            raise ValueError('JSON来源超过64MiB全量解析预算；JSONL请用scripts/record_query.py定向筛选')
+        if extension in ('jsonl', 'ndjson'):
+            records = iter_jsonl(filepath)
+        else:
+            content, encoding = read_text(filepath)
+            data = decode_record(content)
+            if not isinstance(data, (dict, list)):
+                raise ValueError('JSON根必须为对象或对象数组；不推断其他业务粒度')
+            def objects():
+                for index, obj in enumerate(data if isinstance(data, list) else [data]):
+                    pointer = '/' + str(index) if isinstance(data, list) else ''
+                    values, pointers, types = record_fields(obj, pointer)
+                    yield {'values': values, 'json_pointer': pointer,
+                           'field_pointers': pointers, 'value_types': types,
+                           'encoding': encoding, 'structured': True,
+                           'raw_record': None, 'record_num': index + 1}
+            records = objects()
+        units, cells, source_chars = [], 0, 0
+        for index, record in enumerate(records, 1):
+            fields = record['values']
+            cells += len(fields)
+            if index > self.MAX_UNITS or cells > self.MAX_CELLS:
+                raise ValueError('JSON全量索引超过记录/字段预算；JSONL请用scripts/record_query.py定向筛选，未返回部分结果')
+            raw = record.get('raw_record')
+            if raw is None:
+                # This is a value synopsis, not claimed to be an exact quote.
+                raw = ' | '.join(f'{key}={value}' for key, value in fields.items())
+            source_chars += len(raw)
+            if source_chars > MAX_TEXT_INPUT_BYTES:
+                raise ValueError('JSON累计文本超过全量解析预算，未返回部分结果')
+            metadata = {key: value for key, value in record.items() if key != 'values'}
+            metadata.update(location_kind='json_pointer', raw_text_is_source_quote=record.get('raw_record') is not None)
+            units.append(AddressableUnit(
+                _make_unit_id(filepath, record.get('row_num'), index, record['json_pointer']),
+                filepath, extension, record.get('row_num'), None, index, None, None,
+                list(fields), list(fields.values()), raw, metadata=metadata))
+        return units
+
+
 class DocxParser:
     """Read paragraphs and table rows in body order, with OOXML locations."""
 
@@ -369,11 +418,20 @@ class DocxParser:
             if any(p.text.strip() for part in (section.header, section.footer) for p in part.paragraphs):
                 self.diagnostics.append({'code': 'docx_header_footer', 'severity': 'warning', 'message': '页眉页脚未加入主体单元，须按需复核'})
                 break
+        for tag, code in (('w:ins', 'docx_tracked_changes'), ('w:del', 'docx_tracked_changes'),
+                          ('w:drawing', 'docx_drawing'), ('w:footnoteReference', 'docx_footnotes'),
+                          ('w:endnoteReference', 'docx_endnotes')):
+            if doc.element.xpath('.//' + tag) and not any(item['code'] == code for item in self.diagnostics):
+                self.diagnostics.append({'code': code, 'severity': 'warning',
+                                         'message': '文档含修订/绘图/注释引用，正文提取未证明覆盖这些内容，须定向复核'})
         return units
 
 
 class TextParser:
     """解析 .txt / .md 文件，按段落/行切分"""
+    MAX_CHUNK_CHARS = 8000
+    CHUNK_OVERLAP = 128
+    MAX_UNITS = 100000
 
     def parse(self, filepath: str) -> List[AddressableUnit]:
         self.diagnostics = []
@@ -398,23 +456,40 @@ class TextParser:
 
             is_rule = _is_rule_text(text)
 
-            unit = AddressableUnit(
-                unit_id=_make_unit_id(filepath, first_line, para_num),
-                source_file=filepath,
-                file_type="md" if file_ext == ".md" else "txt",
-                row_num=first_line,
-                page_num=None,
-                paragraph_num=para_num,
-                char_offset=char_offset,
-                sheet_name=None,
-                field_names=["content"],
-                field_values=[text],
-                raw_text=text,
-                is_rule=is_rule,
-                metadata={'encoding': encoding, 'offset_scope': 'decoded_source_text',
-                          'line_end': first_line + text.count('\n')},
-            )
-            units.append(unit)
+            chunks = []
+            start = 0
+            while start < len(text):
+                end = min(start + self.MAX_CHUNK_CHARS, len(text))
+                chunks.append((start, end))
+                if end == len(text):
+                    break
+                start = end - self.CHUNK_OVERLAP
+            previous_start, chunk_line = 0, first_line
+            for chunk_num, (start, end) in enumerate(chunks, 1):
+                chunk = text[start:end]
+                chunk_line += text.count('\n', previous_start, start)
+                previous_start = start
+                unit = AddressableUnit(
+                    unit_id=_make_unit_id(filepath, chunk_line, para_num, '' if len(chunks) == 1 else f'chunk{chunk_num}'),
+                    source_file=filepath,
+                    file_type="md" if file_ext == ".md" else "txt",
+                    row_num=chunk_line,
+                    page_num=None,
+                    paragraph_num=para_num,
+                    char_offset=char_offset + start,
+                    sheet_name=None,
+                    field_names=["content"],
+                    field_values=[chunk],
+                    raw_text=chunk,
+                    is_rule=is_rule,
+                    metadata={'encoding': encoding, 'offset_scope': 'decoded_source_text',
+                              'line_end': chunk_line + chunk.count('\n'),
+                              'chunk_num': chunk_num, 'chunk_count': len(chunks),
+                              'chunk_overlap_chars': self.CHUNK_OVERLAP if chunk_num > 1 else 0},
+                )
+                if len(units) >= self.MAX_UNITS:
+                    raise ValueError('文本单元数超过全量解析预算；请按原始位置缩小范围，未返回部分结果')
+                units.append(unit)
 
         return units
 
@@ -521,6 +596,9 @@ class FileParser:
         '.txt': TextParser,
         '.md': TextParser,
         '.sql': SQLParser,
+        '.json': JSONParser,
+        '.jsonl': JSONParser,
+        '.ndjson': JSONParser,
         **{ext: ImageParser for ext in ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.webp')},
     }
 

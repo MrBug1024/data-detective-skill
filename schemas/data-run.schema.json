@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Data lineage run status",
+  "type": "object",
+  "required": ["schema_version", "run_id", "operation", "state", "execution", "outcome", "exit_code", "lineage_status", "agent_action", "artifacts", "phase", "elapsed_seconds"],
+  "properties": {
+    "schema_version": {"enum": ["1.0", "1.1"]},
+    "run_id": {"type": "string", "minLength": 1},
+    "operation": {"enum": ["trace", "query", "reconcile", "report", "prepare"]},
+    "state": {"enum": ["running", "completed", "partial", "failed"]},
+    "execution": {"enum": ["running", "succeeded", "failed"]},
+    "outcome": {"enum": [null, "incomplete", "candidates_only", "verified_computation", "mismatch", "extraction_complete", "no_matches", "execution_error", "output_error", "sources_located", "ambiguous_sources", "partial_source_trace", "source_evidence_found", "evidence_located", "index_prepared"]},
+    "exit_code": {"enum": [null, 0, 1, 2]},
+    "lineage_status": {"const": "not_proven"},
+    "agent_action": {"type": "string"},
+    "phase": {"type": "string"},
+    "elapsed_seconds": {"type": "number", "minimum": 0},
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["path", "sha256", "bytes"],
+        "properties": {"path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "bytes": {"type": "integer", "minimum": 0}}
+      }
+    }
+  }
+}

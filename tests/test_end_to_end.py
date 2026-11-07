@@ -1,164 +1,110 @@
-#!/usr/bin/env python3
-"""端到端测试：从示例数据验证完整链路"""
-import sys
-import os
-import unittest
-import subprocess
+"""Unified-entry regression: the original A500/B750/C30/D76 lineage remains intact."""
+import contextlib
+import importlib.util
+import io
 import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
 
-ROOT = os.path.join(os.path.dirname(__file__), '..')
-SCRIPTS = os.path.join(ROOT, 'scripts')
-EXAMPLES = os.path.join(ROOT, 'examples')
-sys.path.insert(0, SCRIPTS)
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+from trace_pipeline import trace_sources
+from trace_wall import generate_trace_wall, prepare_trace_wall
+from run_contract import assess
 
 
 class TestEndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        """生成示例数据"""
-        gen = os.path.join(EXAMPLES, 'generate_examples.py')
-        result = subprocess.run([sys.executable, gen], capture_output=True, text=True, encoding='utf-8',
-                                env={**os.environ, 'PYTHONUTF8': '1'}, cwd=EXAMPLES)
-        if result.returncode != 0:
-            raise Exception(f"Failed to generate examples: {result.stderr}")
+        cls.temporary = tempfile.TemporaryDirectory(prefix='lineage_examples_')
+        cls.folder = Path(cls.temporary.name)
+        spec = importlib.util.spec_from_file_location('lineage_example_fixture', ROOT / 'examples/generate_examples.py')
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        generator.OUTPUT_DIR = cls.folder
+        with contextlib.redirect_stdout(io.StringIO()):
+            generator.main()
 
-    def test_trace_r1_row1(self):
-        """验证R1第1行能溯源到A500+B750+C30+D76"""
-        from detective import DataDetective
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
 
-        detective = DataDetective(verbose=False)
-        chain = detective.trace(
-            result_file=os.path.join(EXAMPLES, 'R1.xlsx'),
-            result_row=2,  # Excel第2行=第1数据行
-            source_files=[
-                os.path.join(EXAMPLES, 'A.xlsx'),
-                os.path.join(EXAMPLES, 'B.xlsx'),
-                os.path.join(EXAMPLES, 'C.xlsx'),
-                os.path.join(EXAMPLES, 'D.xlsx'),
-                os.path.join(EXAMPLES, 'rules.md'),
-            ],
-        )
+    def trace(self, sources):
+        return trace_sources(self.folder / 'R1.xlsx', [self.folder / source for source in sources],
+                             row=2, cache_dir=self.folder / 'cache')
 
-        # 基本结构检查
-        self.assertIsNotNone(chain)
-        self.assertGreater(len(chain.nodes), 1)  # 至少有结果节点+1个源节点
-        self.assertGreater(len(chain.edges), 0)
-        self.assertGreater(chain.confidence, 0.0)
-        selected = {os.path.basename(n.source_file): n.row_num for n in chain.nodes if n.node_type == 'source'}
+    def test_original_four_source_rows_remain_exact(self):
+        report = self.trace(['A.xlsx', 'B.xlsx', 'C.xlsx', 'D.xlsx', 'rules.md'])
+        matches = report['result_rows'][0]['source_matches']
+        selected = {Path(item['file']).name: item['row_num'] for item in matches}
         self.assertEqual(selected, {'A.xlsx': 500, 'B.xlsx': 750, 'C.xlsx': 30, 'D.xlsx': 76})
+        self.assertTrue(all(item['status'] == 'located' for item in matches))
+        self.assertEqual(report['source_localization']['status'], 'located')
+        self.assertIsNone(report['confidence'])
+        self.assertEqual(report['historical_lineage']['status'], 'not_proven')
+        self.assertGreaterEqual(len(report['chain']['nodes']), 5)
+        self.assertGreaterEqual(len(report['chain']['edges']), 4)
 
-        print(f"\n[Test] Chain confidence: {chain.confidence:.2f}")
-        print(f"[Test] Nodes: {len(chain.nodes)}, Edges: {len(chain.edges)}")
+    def test_customer_identifier_and_original_cells_are_preserved(self):
+        report = self.trace(['A.xlsx', 'B.xlsx'])
+        matches = report['result_rows'][0]['source_matches']
+        self.assertTrue(any(item['values'].get('客户ID') == 'C000500' for item in matches))
+        customer = next(item for item in matches if Path(item['file']).name == 'A.xlsx')
+        self.assertEqual(customer['row_num'], 500)
+        self.assertEqual(customer['cells']['客户ID']['address'], 'A500')
+        self.assertEqual(len(customer['source_sha256']), 64)
 
-    def test_finds_customer_id(self):
-        """验证能找到客户ID关联"""
-        from detective import DataDetective
+    def test_report_and_machine_status_have_separate_evidence_dimensions(self):
+        report = self.trace(['A.xlsx'])
+        for key in ('result_ref', 'result_rows', 'source_profiles', 'field_mappings', 'coverage',
+                    'source_localization', 'calculation_verification', 'historical_lineage', 'chain'):
+            self.assertIn(key, report)
+        self.assertEqual(report['calculation_verification']['status'], 'not_checked')
+        self.assertEqual(report['historical_lineage']['status'], 'not_proven')
+        self.assertEqual(assess(report)['outcome'], 'sources_located')
+        self.assertTrue(any(mapping['status'] == 'unresolved' for mapping in report['field_mappings']))
 
-        detective = DataDetective(verbose=False)
-        chain = detective.trace(
-            result_file=os.path.join(EXAMPLES, 'R1.xlsx'),
-            result_row=2,
-            source_files=[
-                os.path.join(EXAMPLES, 'A.xlsx'),
-                os.path.join(EXAMPLES, 'B.xlsx'),
-            ],
-        )
+    def test_trace_wall_preserves_report_locations_and_values(self):
+        report = self.trace(['A.xlsx'])
+        path = self.folder / 'wall.html'
+        generate_trace_wall(report, path)
+        text = path.read_text(encoding='utf-8')
+        self.assertIn('数据溯源', text)
+        self.assertIn('C000500', text)
+        self.assertGreater(len(text), 1000)
+        view = prepare_trace_wall(report)['views'][0]
+        source = next(n for n in view['chain']['nodes'] if n['node_type'] == 'source')
+        self.assertEqual(source['row_num'], 500)
+        self.assertEqual(source['source_file'], str(self.folder / 'A.xlsx'))
 
-        # 至少应该在节点中找到C000500相关内容
-        all_values = []
-        for node in chain.nodes:
-            all_values.extend(node.field_values)
-        found = any('C000500' in str(v) for v in all_values)
-        self.assertTrue(found, "应该找到客户ID C000500")
+    def test_missing_requested_source_is_partial_and_actionable(self):
+        report = self.trace(['A.xlsx', 'missing.xlsx'])
+        self.assertEqual(report['source_localization']['status'], 'partial')
+        self.assertTrue(any(i['code'] == 'source_missing' for i in report['issues']))
+        self.assertEqual(assess(report)['exit_code'], 2)
+        self.assertEqual(report['result_rows'][0]['source_matches'][0]['row_num'], 500)
 
-    def test_chain_json_structure(self):
-        """验证输出JSON结构符合schema"""
-        import tempfile
-        from detective import DataDetective
-
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
-            json_path = f.name
-
-        try:
-            detective = DataDetective(verbose=False)
-            chain = detective.trace(
-                result_file=os.path.join(EXAMPLES, 'R1.xlsx'),
-                result_row=2,
-                source_files=[os.path.join(EXAMPLES, 'A.xlsx')],
-                output_json=json_path,
-            )
-
-            with open(json_path, encoding='utf-8') as f:
-                data = json.load(f)
-
-            required_keys = ['result_ref', 'chain_id', 'nodes', 'edges', 'confidence',
-                              'missing', 'conflicts', 'hypotheses', 'source_locations']
-            for key in required_keys:
-                self.assertIn(key, data, f"缺少字段: {key}")
-
-            self.assertIsInstance(data['confidence'], float)
-            self.assertIsInstance(data['nodes'], list)
-            self.assertIsInstance(data['edges'], list)
-
-        finally:
-            if os.path.exists(json_path):
-                os.unlink(json_path)
-
-    def test_html_generation(self):
-        """验证HTML文件能正常生成"""
-        import tempfile
-        from detective import DataDetective
-
-        with tempfile.NamedTemporaryFile(suffix='.html', delete=False) as f:
-            html_path = f.name
-
-        try:
-            detective = DataDetective(verbose=False)
-            chain = detective.trace(
-                result_file=os.path.join(EXAMPLES, 'R1.xlsx'),
-                result_row=2,
-                source_files=[os.path.join(EXAMPLES, 'A.xlsx')],
-                output_html=html_path,
-            )
-
-            self.assertTrue(os.path.exists(html_path))
-            with open(html_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            self.assertIn('数据链路侦探', content)
-            self.assertIn('马赛克调查墙', content)
-            self.assertGreater(len(content), 1000)
-
-        finally:
-            if os.path.exists(html_path):
-                os.unlink(html_path)
-
-    def test_partial_sources(self):
-        """测试只提供部分源文件时输出missing字段"""
-        from detective import DataDetective
-
-        detective = DataDetective(verbose=False)
-        # 只提供A表，不提供B/C/D
-        chain = detective.trace(
-            result_file=os.path.join(EXAMPLES, 'R1.xlsx'),
-            result_row=2,
-            source_files=[os.path.join(EXAMPLES, 'A.xlsx')],
-        )
-        # 链路应该是部分的，不应该崩溃
-        self.assertIsNotNone(chain)
-
-    def test_cli_runs(self):
-        """验证CLI能正常运行"""
-        result = subprocess.run([
-            sys.executable, os.path.join(SCRIPTS, 'trace.py'),
-            '--result', os.path.join(EXAMPLES, 'R1.xlsx'),
-            '--row', '2',
-            '--sources', os.path.join(EXAMPLES, 'A.xlsx'),
-            '--no-html', '--no-json',
-        ], capture_output=True, text=True, encoding='utf-8', cwd=ROOT)
-
-        self.assertEqual(result.returncode, 0, f"CLI failed: {result.stderr}")
-        self.assertIn('置信度', result.stdout)
+    def test_unified_cli_writes_matching_terminal_status_and_artifacts(self):
+        out_dir = self.folder / 'cli-run'
+        completed = subprocess.run([sys.executable, str(ROOT / 'scripts/data_run.py'), 'trace',
+            '--result', str(self.folder / 'R1.xlsx'), '--row', '2', '--sources', str(self.folder / 'A.xlsx'),
+            '--out-dir', str(out_dir), '--cache-dir', str(self.folder / 'cache')],
+            capture_output=True, encoding='utf-8', cwd=ROOT)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        status = json.loads((out_dir / 'status.json').read_text(encoding='utf-8'))
+        report = json.loads((out_dir / 'report.json').read_text(encoding='utf-8'))
+        self.assertEqual(status['state'], 'completed')
+        self.assertEqual(status['outcome'], 'sources_located')
+        self.assertEqual(status['exit_code'], completed.returncode)
+        self.assertTrue((out_dir / 'wall.html').is_file())
+        self.assertEqual(report['result_rows'][0]['source_matches'][0]['row_num'], 500)
+        terminal = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(terminal['event'], 'data_run_finished')
+        self.assertEqual(terminal['run_id'], status['run_id'])
 
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    unittest.main()

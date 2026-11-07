@@ -1,12 +1,15 @@
 """
 entity_extractor.py — 实体提取器
 从文本和结构化数据中提取：人名、公司名、金额、日期、地点、ID、电话
-用于支持「实体调查」和「事件还原」模式
+为数据溯源提供带出处的字段角色、标识提及和候选连接。
 """
 import re
+import json
+from decimal import Decimal
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from matcher import is_identifier_field
+from document_entities import extract_document_entities
 
 
 @dataclass
@@ -21,7 +24,7 @@ class Entity:
     page_num: Optional[int]
     paragraph_num: Optional[int]
     char_offset: Optional[int]
-    confidence: float
+    confidence: Optional[float]
     attributes: Dict[str, Any] = field(default_factory=dict)
     mentions: List[Dict] = field(default_factory=list)
 
@@ -37,8 +40,9 @@ class Entity:
             "page_num": self.page_num,
             "paragraph_num": self.paragraph_num,
             "char_offset": self.char_offset,
-            "confidence": round(self.confidence, 4),
-            "attributes": self.attributes,
+            "confidence": round(self.confidence, 4) if self.confidence is not None else None,
+            "confidence_semantics": "legacy_extraction_heuristic_not_identity_probability" if self.confidence is not None else "not_assessed",
+            "attributes": json.loads(json.dumps(self.attributes, ensure_ascii=False, default=str)),
             "mentions": self.mentions,
         }
 
@@ -158,13 +162,27 @@ class EntityExtractor:
         return f"{prefix}_{self._entity_counter:04d}"
 
     @staticmethod
-    def _amount_value(text: str) -> float:
+    def _amount_value(text: str) -> Decimal:
         cleaned = re.sub(r'[,，\s¥￥$€]', '', text)
         match = re.fullmatch(r'(-?\d+(?:\.\d+)?)(亿元|万元|元|USD|CNY|EUR|亿|万)?', cleaned, re.I)
         if not match:
             raise ValueError(f"Invalid amount: {text}")
         multiplier = 100000000 if match.group(2) in ('亿', '亿元') else 10000 if match.group(2) in ('万', '万元') else 1
-        return float(match.group(1)) * multiplier
+        return Decimal(match.group(1)) * multiplier
+
+    def extract_mentions(self, unit):
+        """Return typed, scoped mentions and conservative document bridges."""
+        metadata = unit.metadata or {}
+        location = {'file': unit.source_file, 'row': unit.row_num, 'sheet': unit.sheet_name,
+                    'page': unit.page_num, 'paragraph': unit.paragraph_num,
+                    'char_offset': unit.char_offset, 'metadata': metadata,
+                    'cells': metadata.get('cells', {}), 'field_pointers': metadata.get('field_pointers', {})}
+        structured = (unit.file_type in ('xlsx', 'xls', 'csv', 'tsv', 'json', 'jsonl', 'ndjson')
+                      or metadata.get('structured') or metadata.get('structural'))
+        return extract_document_entities(unit.raw_text, location=location,
+            source_sha256=metadata.get('source_sha256'),
+            fields=dict(zip(unit.field_names, unit.field_values)) if structured else None,
+            ocr_confidence=unit.ocr_confidence)
 
     def extract_from_unit(self, unit) -> Tuple[List[Entity], List[TimelineEvent]]:
         """从一个AddressableUnit提取所有实体和时间线事件"""
@@ -179,6 +197,26 @@ class EntityExtractor:
 
         entities.extend(ents)
         events.extend(evts)
+        packet = self.extract_mentions(unit)
+        for mention in packet['mentions']:
+            expected = 'id' if mention['entity_type'] == 'identifier' else mention['entity_type']
+            existing = next((entity for entity in entities if entity.entity_type == expected and
+                             str(entity.name) == mention['raw_value'] and
+                             (not mention['source_location'].get('field') or
+                              entity.attributes.get('field') == mention['source_location']['field'])), None)
+            if existing is None and expected == 'id':
+                selector = mention.get('selector') or {}
+                existing = Entity(mention['mention_id'], mention['raw_value'], 'id', mention['raw_value'],
+                                  mention['raw_value'], unit.source_file, unit.row_num, unit.page_num,
+                                  unit.paragraph_num, selector.get('source_start', selector.get('start')), None)
+                entities.append(existing)
+            if existing is not None:
+                existing.attributes.update(identifier_namespace=mention['identifier_namespace'],
+                                           assertion=mention['assertion'], scope=mention['scope'],
+                                           ocr=mention['ocr'], identity_verified=False,
+                                           can_seed_lookup=mention['can_seed_lookup'])
+                existing.mentions.append({'mention_id': mention['mention_id'],
+                                          'selector': mention['selector'], 'source_location': mention['source_location']})
         return entities, events
 
     def _extract_structured(self, unit) -> Tuple[List[Entity], List[TimelineEvent]]:
